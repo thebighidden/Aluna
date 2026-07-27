@@ -1,0 +1,13 @@
+node_modules/
+.pnpm-store/
+.next/
+dist/
+coverage/
+.env
+.env.local
+output/
+outputs/
+uploads/
+work/
+*.log
+.DS_Store

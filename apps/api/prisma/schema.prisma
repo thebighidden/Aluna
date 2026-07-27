@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum GenerationStatus {
+  QUEUED
+  ANALYZING
+  GENERATING
+  DONE
+  FAILED
+}
+
+model Generation {
+  id         String           @id @default(cuid())
+  userId     String           @default("user_demo")
+  status     GenerationStatus @default(QUEUED)
+  category   String
+  sceneId    String
+  inputKey   String
+  outputKeys String[]         @default([])
+  costUsd    Decimal          @default(0) @db.Decimal(10, 6)
+  durationMs Int              @default(0)
+  error      String?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@index([createdAt])
+  @@index([status])
+  @@map("generation_runs")
+}
