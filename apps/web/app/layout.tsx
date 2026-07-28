@@ -1,5 +1,12 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import '@clr/city/css/light.css';
+import '@clr/city/css/regular.css';
+import '@clr/city/css/medium.css';
+import '@clr/city/css/semibold.css';
+import '@clr/city/css/bold.css';
+import '@clr/city/css/extra-bold.css';
+import '@clr/city/css/black.css';
 import './globals.css';
 
 export const metadata: Metadata = {
