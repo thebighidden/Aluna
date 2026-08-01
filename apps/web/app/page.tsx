@@ -4,61 +4,64 @@
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import Link from 'next/link';
-import { useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, useLayoutEffect, useRef, useState } from 'react';
 import { LanguageToggle, useLanguagePreference } from './components/language-toggle';
 import type { LocalizedText } from './components/language-toggle';
 
 gsap.registerPlugin(ScrollTrigger);
 
-const localized = (en: string, fr: string): LocalizedText => ({ en, fr });
+const localized = (en: string, fr: string, ar: string): LocalizedText => ({ en, fr, ar });
 
 const directions = [
   {
     index: '01',
-    type: localized('Clothing / On-model', 'Vêtements / Sur mannequin'),
-    title: localized('Worn, not staged', 'Porté, jamais posé'),
+    type: localized('Clothing / On-model', 'Vêtements / Sur mannequin', 'الملابس / على موديل'),
+    title: localized('Worn, not staged', 'Porté, jamais posé', 'ملبوسة، ماشي غير معروضة'),
     image: '/images/aluna-shirt-model.png',
     className: 'aluna-work-card--serum',
   },
   {
     index: '02',
-    type: localized('Footwear / Launch', 'Chaussures / Lancement'),
-    title: localized('Electric motion', 'Mouvement électrique'),
+    type: localized('Footwear / Launch', 'Chaussures / Lancement', 'الصبابط / إطلاق'),
+    title: localized('Electric motion', 'Mouvement électrique', 'حركة بطاقة قوية'),
     image: '/images/aluna-sneaker-campaign.png',
     className: 'aluna-work-card--sneaker',
   },
   {
     index: '03',
-    type: localized('Cosmetics / Campaign', 'Cosmétiques / Campagne'),
-    title: localized('Beauty in focus', 'La beauté en lumière'),
+    type: localized('Cosmetics / Campaign', 'Cosmétiques / Campagne', 'التجميل / حملة'),
+    title: localized('Beauty in focus', 'La beauté en lumière', 'الجمال فالصورة'),
     image: '/images/aluna-makeup-model.png',
     className: 'aluna-work-card--beauty',
   },
 ];
 
-const process = [
+const processSteps = [
   {
     number: '01',
-    title: localized('Bring your product', 'Importez votre produit'),
+    title: localized('Bring your product', 'Importez votre produit', 'جيب المنتوج ديالك'),
     copy: localized(
       'Drop in one clean packshot. Aluna reads its geometry, color, materials, label, and every detail that makes it yours.',
       'Ajoutez une photo produit nette. Aluna analyse sa forme, sa couleur, ses matières, son étiquette et chaque détail qui le rend unique.',
+      'حمّل تصويرة واضحة ديال المنتوج. Aluna كيقرا الشكل، اللون، الخامات، الليبيل وكل تفصيلة كتميز البراند ديالك.',
     ),
   },
   {
     number: '02',
-    title: localized('Choose the world', 'Choisissez l’univers'),
+    title: localized('Choose the world', 'Choisissez l’univers', 'اختار الجو'),
     copy: localized(
       'Start from a directed scene, then shape the light, surface, mood, and format around the campaign you need.',
       'Partez d’une scène dirigée, puis façonnez la lumière, la surface, l’ambiance et le format de votre campagne.',
+      'بدا بمشهد واجد، ومن بعد اختار الضو، السطح، الجو والفورما اللي كتناسب الحملة ديالك.',
     ),
   },
   {
     number: '03',
-    title: localized('Build the campaign', 'Créez la campagne'),
+    title: localized('Build the campaign', 'Créez la campagne', 'صايب الحملة'),
     copy: localized(
       'Generate a consistent image set for product pages, paid media, launches, and social—all from the same source.',
       'Créez une série cohérente pour vos fiches produit, publicités, lancements et réseaux sociaux, à partir d’une seule source.',
+      'خرّج سلسلة صور منسجمة للمتجر، الإعلانات، الإطلاق والسوشيال ميديا، كاملين من نفس الصورة.',
     ),
   },
 ];
@@ -66,11 +69,20 @@ const process = [
 const comparisons = [
   {
     id: 'fashion',
-    category: localized('Clothing / Virtual model', 'Vêtements / Mannequin virtuel'),
-    title: localized('From flat lay to campaign.', 'Du flat lay à la campagne.'),
+    category: localized(
+      'Clothing / Virtual model',
+      'Vêtements / Mannequin virtuel',
+      'الملابس / موديل افتراضي',
+    ),
+    title: localized(
+      'From flat lay to campaign.',
+      'Du flat lay à la campagne.',
+      'من تصويرة عادية لحملة كاملة.',
+    ),
     copy: localized(
       'Upload a simple photo of your garment. Aluna keeps the cut, color, fabric, stitching, and print while placing it naturally on a model.',
       'Importez une simple photo du vêtement. Aluna conserve la coupe, la couleur, la matière, les coutures et l’imprimé tout en le plaçant naturellement sur un mannequin.',
+      'حمّل تصويرة بسيطة ديال اللبسة. Aluna كيحافظ على القصة، اللون، الثوب، الخياطة والطباعة وكيبيّنها طبيعية فوق موديل.',
     ),
     before: '/images/aluna-shirt-before.png',
     after: '/images/aluna-shirt-model.png',
@@ -79,11 +91,20 @@ const comparisons = [
   },
   {
     id: 'perfume',
-    category: localized('Cosmetics / Pro studio', 'Cosmétiques / Studio pro'),
-    title: localized('From countertop to studio.', 'Du comptoir au studio.'),
+    category: localized(
+      'Cosmetics / Pro studio',
+      'Cosmétiques / Studio pro',
+      'التجميل / ستوديو احترافي',
+    ),
+    title: localized(
+      'From countertop to studio.',
+      'Du comptoir au studio.',
+      'من تصويرة بالتليفون لستوديو.',
+    ),
     copy: localized(
       'Start with an everyday phone snapshot. Aluna removes the background and rebuilds the lighting, surface, and atmosphere around the exact bottle.',
       'Partez d’une photo prise au téléphone. Aluna retire l’arrière-plan et recrée la lumière, la surface et l’atmosphère autour du flacon exact.',
+      'بدا بتصويرة عادية بالتليفون. Aluna كيحيد الخلفية وكيعاود يبني الضو، السطح والجو حول نفس القنينة بلا ما يبدلها.',
     ),
     before: '/images/aluna-perfume-before.png',
     after: '/images/aluna-perfume-studio.png',
@@ -95,62 +116,86 @@ const comparisons = [
 const faqs = [
   {
     question: localized(
+      'How does the free launch week work?',
+      'Comment fonctionne la semaine offerte ?',
+      'كيفاش خدامة السيمانة المجانية؟',
+    ),
+    answer: localized(
+      'Join the waitlist with your WhatsApp number. When Aluna opens, we will message your founding-access invitation with one free week for your workspace.',
+      'Inscrivez-vous avec votre numéro WhatsApp. À l’ouverture d’Aluna, nous vous enverrons votre invitation fondatrice avec une semaine offerte pour votre espace.',
+      'دخل رقم الواتساب ديالك فاللائحة. ملي Aluna يتحل، غادي نرسلو ليك الدعوة ومعاها سيمانة كاملة مجانية.',
+    ),
+  },
+  {
+    question: localized(
       'Can Aluna put my clothing on a model?',
       'Aluna peut-elle placer mon vêtement sur un mannequin ?',
+      'واش Aluna يقدر يلبّس المنتوج ديالي لموديل؟',
     ),
     answer: localized(
       'Yes. Upload a clear flat lay, mannequin shot, or clean product photo. Choose an on-model direction and Aluna generates a styled model image while preserving the garment’s construction and artwork.',
       'Oui. Importez un flat lay net, une photo sur mannequin ou une photo produit propre. Choisissez une direction portée et Aluna crée une image stylisée tout en préservant la construction et les motifs du vêtement.',
+      'إييه. حمّل تصويرة واضحة ديال اللبسة، واختار ستايل فوق موديل. Aluna كيصايب الصورة وكيحافظ على القصة، الخياطة، اللون والطباعة.',
     ),
   },
   {
     question: localized(
       'Will the color, logo, and print stay accurate?',
       'La couleur, le logo et l’imprimé resteront-ils fidèles ?',
+      'واش اللون، اللوغو والطباعة غيبقاو كيف ما هما؟',
     ),
     answer: localized(
       'Product fidelity is the priority. Aluna locks the garment silhouette, base color, materials, logo placement, and printed details into every prompt. You should still review final assets before publishing, especially products with very small text.',
       'La fidélité du produit est prioritaire. Aluna protège la silhouette, la couleur, les matières, l’emplacement du logo et les détails imprimés. Vérifiez toujours les visuels avant publication, surtout lorsque le produit contient de très petits textes.',
+      'الدقة ديال المنتوج هي الأولوية. Aluna كيحافظ على الشكل، اللون، الخامات، بلاصة اللوغو والتفاصيل المطبوعة. راجع الصور قبل النشر، خصوصاً إلا كان فيها خط صغير بزاف.',
     ),
   },
   {
     question: localized(
       'Do I need a professional source photo?',
       'Ai-je besoin d’une photo source professionnelle ?',
+      'واش خاصني تصويرة احترافية من الأول؟',
     ),
     answer: localized(
       'No. A well-lit phone photo can work. Keep the complete product visible, avoid heavy shadows or blur, and use the highest-resolution original you have.',
       'Non. Une photo bien éclairée prise au téléphone peut suffire. Gardez le produit entièrement visible, évitez le flou et les ombres fortes, et utilisez l’original avec la meilleure résolution disponible.',
+      'لا. تصويرة بالتليفون وبضو مزيان كافية. خلّي المنتوج كامل باين، بعد من الضلال القوية والغباش، واستعمل أحسن جودة عندك.',
     ),
   },
   {
     question: localized(
       'Can it remove or replace the background?',
       'Peut-on retirer ou remplacer l’arrière-plan ?',
+      'واش يقدر يحيد ولا يبدل الخلفية؟',
     ),
     answer: localized(
       'Yes. Aluna can clean an ordinary background, create a neutral catalog cutout, or place the same product into a fully art-directed studio or lifestyle environment.',
       'Oui. Aluna peut nettoyer un arrière-plan ordinaire, créer un détourage neutre pour catalogue ou placer le même produit dans un studio ou un décor lifestyle entièrement dirigé.',
+      'إييه. Aluna يقدر ينقّي الخلفية، يصايب صورة كاتالوغ نقية، ولا يحط نفس المنتوج فستوديو ولا ديكور لايفستايل كامل.',
     ),
   },
   {
     question: localized(
       'What can I create besides clothing?',
       'Que puis-je créer en dehors des vêtements ?',
+      'شنو نقدر نصايب من غير الملابس؟',
     ),
     answer: localized(
       'The same workflow supports cosmetics, skincare, food, furniture, and electronics. Clothing is the lead experience, while category-specific scenes keep lighting and materials believable.',
       'Le même flux prend en charge les cosmétiques, les soins, l’alimentation, le mobilier et l’électronique. Les scènes adaptées à chaque catégorie conservent une lumière et des matières crédibles.',
+      'نفس الخدمة كتخدم مع التجميل، العناية بالبشرة، الماكلة، الأثاث والإلكترونيات. كل صنف عندو مشاهد وضو مناسبين باش النتيجة تبان حقيقية.',
     ),
   },
   {
     question: localized(
       'How many images can one product create?',
       'Combien d’images peut-on créer à partir d’un produit ?',
+      'شحال من صورة نقدر نخرج من منتوج واحد؟',
     ),
     answer: localized(
       'You can generate multiple variants and campaign directions from one source, including product-page, social, advertising, and marketplace compositions.',
       'Vous pouvez créer plusieurs variantes et directions de campagne depuis une seule source, pour les fiches produit, les réseaux sociaux, la publicité et les marketplaces.',
+      'تقدر تخرج بزاف ديال النسخ والستايلات من صورة وحدة: للمتجر، السوشيال ميديا، الإعلانات والماركت بلايس.',
     ),
   },
 ];
@@ -163,7 +208,7 @@ const landingCopy = {
       transformations: 'Before / After',
       process: 'Process',
       faq: 'FAQ',
-      studio: 'Enter studio',
+      studio: 'Join waitlist',
     },
     hero: {
       eyebrow: 'Fashion and product studio',
@@ -172,12 +217,12 @@ const landingCopy = {
       titleSecond: 'Every',
       titleAccent: 'world.',
       copy: 'Turn one flat T-shirt photo into an on-model fashion campaign, while preserving the garment your customers will actually receive.',
-      primaryAction: 'Create a campaign',
+      primaryAction: 'Claim your free week',
       secondaryAction: 'See before and after',
       firstMetaTitle: '01 input',
       firstMetaCopy: 'Any clean product shot',
-      secondMetaTitle: 'On-model ready',
-      secondMetaCopy: 'No physical shoot required',
+      secondMetaTitle: 'Founding access',
+      secondMetaCopy: 'One free week at launch',
       imageAlt: 'Young man wearing a black crescent T-shirt in an editorial campaign',
       imageLabel: 'Created with Aluna',
       imageCategory: 'Fashion / 001',
@@ -225,7 +270,7 @@ const landingCopy = {
         'True-to-source color',
         'Commercial-grade lighting',
       ],
-      action: 'Try it in the studio',
+      action: 'Join the waitlist',
     },
     faq: {
       kicker: 'Questions, answered',
@@ -234,11 +279,18 @@ const landingCopy = {
       copy: 'Everything your team needs to know before turning a simple product photo into a campaign.',
     },
     final: {
-      kicker: 'Ready when you are.',
-      titleFirst: 'Your next campaign',
-      titleSecond: 'starts with',
-      titleAccent: 'one photo.',
-      action: 'Open Aluna Studio',
+      kicker: 'Aluna is coming soon',
+      titleFirst: 'Join early.',
+      titleSecond: 'Create free for',
+      titleAccent: 'one week.',
+      copy: 'Join the founding list and your first week of Aluna is on us when the studio opens.',
+      phoneLabel: 'WhatsApp number',
+      phonePlaceholder: '+212 6 XX XX XX XX',
+      action: 'Reserve my free week',
+      submitting: 'Reserving…',
+      success: 'You’re on the list. We’ll message you on WhatsApp when Aluna opens.',
+      error: 'We could not save your WhatsApp number. Please try again.',
+      privacy: 'Launch updates on WhatsApp only. No spam, and you can opt out at any time.',
     },
     footer: {
       copy: 'Product photography with fidelity built in.',
@@ -252,7 +304,7 @@ const landingCopy = {
       transformations: 'Avant / Après',
       process: 'Processus',
       faq: 'FAQ',
-      studio: 'Entrer dans le studio',
+      studio: 'Rejoindre la liste',
     },
     hero: {
       eyebrow: 'Studio de mode et de produit',
@@ -261,12 +313,12 @@ const landingCopy = {
       titleSecond: 'Tous les',
       titleAccent: 'univers.',
       copy: 'Transformez une simple photo de T-shirt en campagne portée, tout en préservant le vêtement que vos clients recevront réellement.',
-      primaryAction: 'Créer une campagne',
+      primaryAction: 'Profiter de la semaine offerte',
       secondaryAction: 'Voir avant et après',
       firstMetaTitle: '01 source',
       firstMetaCopy: 'Toute photo produit nette',
-      secondMetaTitle: 'Prêt à porter',
-      secondMetaCopy: 'Aucun shooting physique requis',
+      secondMetaTitle: 'Accès fondateur',
+      secondMetaCopy: 'Une semaine offerte au lancement',
       imageAlt: 'Jeune homme portant un T-shirt noir dans une campagne éditoriale',
       imageLabel: 'Créé avec Aluna',
       imageCategory: 'Mode / 001',
@@ -314,7 +366,7 @@ const landingCopy = {
         'Couleur fidèle à la source',
         'Éclairage de qualité commerciale',
       ],
-      action: 'Essayer dans le studio',
+      action: 'Rejoindre la liste',
     },
     faq: {
       kicker: 'Vos questions, nos réponses',
@@ -323,14 +375,119 @@ const landingCopy = {
       copy: 'Tout ce que votre équipe doit savoir avant de transformer une simple photo produit en campagne.',
     },
     final: {
-      kicker: 'Quand vous êtes prêt.',
-      titleFirst: 'Votre prochaine campagne',
-      titleSecond: 'commence par',
-      titleAccent: 'une photo.',
-      action: 'Ouvrir Aluna Studio',
+      kicker: 'Aluna arrive bientôt',
+      titleFirst: 'Rejoignez-nous.',
+      titleSecond: 'Créez gratuitement',
+      titleAccent: 'pendant une semaine.',
+      copy: 'Inscrivez-vous parmi les premiers et profitez d’une semaine offerte dès l’ouverture du studio.',
+      phoneLabel: 'Numéro WhatsApp',
+      phonePlaceholder: '+212 6 XX XX XX XX',
+      action: 'Réserver ma semaine offerte',
+      submitting: 'Inscription…',
+      success:
+        'Vous êtes sur la liste. Nous vous contacterons sur WhatsApp dès l’ouverture d’Aluna.',
+      error: 'Impossible d’enregistrer votre numéro WhatsApp. Veuillez réessayer.',
+      privacy:
+        'Uniquement les nouvelles du lancement sur WhatsApp. Aucun spam, retrait possible à tout moment.',
     },
     footer: {
       copy: 'La photographie produit avec une fidélité intégrée.',
+      copyright: '© 2026 Aluna Studio',
+    },
+  },
+  ar: {
+    languageLabel: 'اختار اللغة',
+    navigationLabel: 'القائمة الرئيسية',
+    nav: {
+      transformations: 'قبل / من بعد',
+      process: 'كيفاش خدام',
+      faq: 'الأسئلة',
+      studio: 'دخل للائحة',
+    },
+    hero: {
+      eyebrow: 'ستوديو ديال الموضة والمنتوجات',
+      titleLabel: 'قطعة وحدة. كل عالم.',
+      titleFirst: 'قطعة وحدة.',
+      titleSecond: 'كل',
+      titleAccent: 'عالم.',
+      copy: 'حوّل تصويرة بسيطة ديال تيشورت لحملة موضة فوق موديل، مع الحفاظ على نفس المنتوج اللي غيوصل للزبون ديالك.',
+      primaryAction: 'خذ السيمانة المجانية',
+      secondaryAction: 'شوف قبل ومن بعد',
+      firstMetaTitle: '01 صورة',
+      firstMetaCopy: 'أي تصويرة منتوج واضحة',
+      secondMetaTitle: 'دخول المؤسسين',
+      secondMetaCopy: 'سيمانة مجانية فالإطلاق',
+      imageAlt: 'شاب لابس تيشورت كحل فحملة موضة',
+      imageLabel: 'تصايبات مع Aluna',
+      imageCategory: 'موضة / 001',
+      noteFirst: 'تصاور موضة فوق موديل.',
+      noteSecond: 'من تصويرة منتوج وحدة.',
+    },
+    tickerLabel: 'خدمات Aluna',
+    ticker: ['صفحات المنتوج', 'إعلانات السوشيال', 'إطلاق الحملات', 'ماركت بلايس'],
+    transformations: {
+      kicker: 'شوف التحويل',
+      titleFirst: 'دخل تصويرة.',
+      titleAccent: 'خرج حملة.',
+      copy: 'جرّ السلايدر وقارن بين التصويرة العادية والنتيجة النهائية ديال Aluna.',
+      before: 'قبل',
+      after: 'من بعد',
+      compareLabel: 'قارن قبل ومن بعد ديال',
+    },
+    work: {
+      kicker: 'ستايلات مختارين / 2026',
+      titleFirst: 'من تصويرة',
+      titleSecond: 'إلى',
+      titleAccent: 'حملة.',
+      copy: 'صورة وحدة كتولي عالم كامل ديال صور قوية، واضحة وواجدة للبيع والاستعمال ديال البراند.',
+      view: 'شوف الستايل',
+    },
+    process: {
+      kicker: 'طريقة أسرع باش تصايب',
+      titleFirst: 'إنتاج أقل.',
+      titleSecond: 'إمكانيات',
+      titleAccent: 'كثر.',
+    },
+    fidelity: {
+      imageAlt: 'قنينة عطر متصورة فستوديو بنفسجي احترافي',
+      shape: 'الشكل محفوظ',
+      material: 'الخامة حقيقية',
+      color: 'اللون مطابق',
+      kicker: 'الدقة هي الأساس',
+      titleFirst: 'حرية فالإبداع.',
+      titleSecond: 'حقيقة',
+      titleAccent: 'المنتوج.',
+      copy: 'Aluna كيبدل العالم اللي داير بالمنتوج، ماشي المنتوج. الشكل، اللون، الخامات، اللوغو والتفاصيل المطبوعة كيبقاو محفوظين.',
+      points: [
+        'نفس الشكل والقياسات',
+        'اللوغو والليبيل محفوظين',
+        'لون مطابق للصورة الأصلية',
+        'ضو بجودة تجارية',
+      ],
+      action: 'دخل للائحة',
+    },
+    faq: {
+      kicker: 'الجواب على أسئلتك',
+      titleFirst: 'التفاصيل',
+      titleAccent: 'المهمة.',
+      copy: 'كلشي اللي خاص الفريق ديالك يعرف قبل ما يحوّل تصويرة منتوج بسيطة لحملة كاملة.',
+    },
+    final: {
+      kicker: 'Aluna قريب يطلق',
+      titleFirst: 'دخل من اللولين.',
+      titleSecond: 'صايب مجاناً',
+      titleAccent: 'سيمانة كاملة.',
+      copy: 'سجّل من اللولين وخذ أول سيمانة ديالك فـ Aluna مجاناً ملي الستوديو يتحل.',
+      phoneLabel: 'رقم الواتساب',
+      phonePlaceholder: '+212 6 XX XX XX XX',
+      action: 'حجز السيمانة المجانية',
+      submitting: 'كنسجلو الرقم…',
+      success: 'راك فاللائحة. غادي نتاصلو بيك فالواتساب ملي Aluna يتحل.',
+      error: 'ما قدرناش نسجلو رقم الواتساب. عاود حاول.',
+      privacy: 'غير أخبار الإطلاق فالواتساب. بلا سبام، وتقدر تحيد راسك فأي وقت.',
+    },
+    footer: {
+      copy: 'تصاور منتوجات بدقة مبنية من الأساس.',
       copyright: '© 2026 Aluna Studio',
     },
   },
@@ -383,7 +540,32 @@ function BeforeAfter({
 export default function LandingPage() {
   const root = useRef<HTMLElement>(null);
   const [language, setLanguage] = useLanguagePreference();
+  const [waitlistPhone, setWaitlistPhone] = useState('');
+  const [waitlistStatus, setWaitlistStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>(
+    'idle',
+  );
   const copy = landingCopy[language];
+
+  const handleWaitlistSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setWaitlistStatus('submitting');
+
+    try {
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? '/api';
+      const response = await fetch(`${apiBaseUrl}/waitlist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: waitlistPhone, locale: language, source: 'landing' }),
+      });
+
+      if (!response.ok) throw new Error('Waitlist subscription failed');
+
+      setWaitlistPhone('');
+      setWaitlistStatus('success');
+    } catch {
+      setWaitlistStatus('error');
+    }
+  };
 
   useLayoutEffect(() => {
     const context = gsap.context(() => {
@@ -474,9 +656,9 @@ export default function LandingPage() {
         </nav>
         <div className="aluna-nav-actions">
           <LanguageToggle language={language} label={copy.languageLabel} onChange={setLanguage} />
-          <Link className="aluna-nav-cta" href="/studio/login">
+          <a className="aluna-nav-cta" href="#waitlist">
             {copy.nav.studio}
-          </Link>
+          </a>
         </div>
       </header>
 
@@ -498,9 +680,9 @@ export default function LandingPage() {
             {copy.hero.copy}
           </p>
           <div className="aluna-hero-actions" data-animate>
-            <Link className="aluna-button aluna-button--dark" href="/studio/login">
+            <a className="aluna-button aluna-button--dark" href="#waitlist">
               {copy.hero.primaryAction}
-            </Link>
+            </a>
             <a className="aluna-text-link" href="#transformations">
               {copy.hero.secondaryAction}
             </a>
@@ -621,7 +803,7 @@ export default function LandingPage() {
           </h2>
         </div>
         <div className="aluna-process-list">
-          {process.map((step) => (
+          {processSteps.map((step) => (
             <article data-reveal key={step.number}>
               <span>{step.number}</span>
               <h3>{step.title[language]}</h3>
@@ -654,9 +836,9 @@ export default function LandingPage() {
               </li>
             ))}
           </ul>
-          <Link className="aluna-button aluna-button--lime" href="/studio/login">
+          <a className="aluna-button aluna-button--lime" href="#waitlist">
             {copy.fidelity.action}
-          </Link>
+          </a>
         </div>
       </section>
 
@@ -684,7 +866,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="aluna-final-cta">
+      <section className="aluna-final-cta" id="waitlist">
         <div className="aluna-final-orb" aria-hidden="true" />
         <p data-reveal>{copy.final.kicker}</p>
         <h2 data-reveal>
@@ -692,9 +874,46 @@ export default function LandingPage() {
           <br />
           {copy.final.titleSecond} <em>{copy.final.titleAccent}</em>
         </h2>
-        <Link className="aluna-button aluna-button--light" href="/studio/login" data-reveal>
-          {copy.final.action}
-        </Link>
+        <div className="aluna-waitlist" data-reveal>
+          <p className="aluna-waitlist-copy">{copy.final.copy}</p>
+          {waitlistStatus === 'success' ? (
+            <div className="aluna-waitlist-success" role="status">
+              <span aria-hidden="true">✓</span>
+              {copy.final.success}
+            </div>
+          ) : (
+            <form className="aluna-waitlist-form" onSubmit={handleWaitlistSubmit}>
+              <label className="sr-only" htmlFor="waitlist-phone">
+                {copy.final.phoneLabel}
+              </label>
+              <input
+                aria-describedby="waitlist-privacy"
+                autoComplete="tel"
+                id="waitlist-phone"
+                inputMode="tel"
+                maxLength={20}
+                minLength={9}
+                name="phone"
+                onChange={(event) => setWaitlistPhone(event.target.value)}
+                placeholder={copy.final.phonePlaceholder}
+                required
+                type="tel"
+                value={waitlistPhone}
+              />
+              <button disabled={waitlistStatus === 'submitting'} type="submit">
+                {waitlistStatus === 'submitting' ? copy.final.submitting : copy.final.action}
+              </button>
+            </form>
+          )}
+          {waitlistStatus === 'error' && (
+            <p className="aluna-waitlist-error" role="alert">
+              {copy.final.error}
+            </p>
+          )}
+          <p className="aluna-waitlist-privacy" id="waitlist-privacy">
+            {copy.final.privacy}
+          </p>
+        </div>
       </section>
 
       <footer className="aluna-footer">

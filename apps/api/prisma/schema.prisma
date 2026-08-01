@@ -15,21 +15,89 @@ enum GenerationStatus {
   FAILED
 }
 
+enum Role {
+  OWNER
+  ADMIN
+  CREATOR
+  VIEWER
+}
+
+model User {
+  id           String           @id @default(cuid())
+  email        String           @unique
+  name         String
+  passwordHash String
+  role         Role             @default(CREATOR)
+  isActive     Boolean          @default(true)
+  generations  Generation[]
+  sessions     RefreshSession[]
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  @@index([role])
+  @@map("users")
+}
+
+model RefreshSession {
+  id        String    @id
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_sessions")
+}
+
 model Generation {
-  id         String           @id @default(cuid())
-  userId     String           @default("user_demo")
-  status     GenerationStatus @default(QUEUED)
-  category   String
-  sceneId    String
-  inputKey   String
-  outputKeys String[]         @default([])
-  costUsd    Decimal          @default(0) @db.Decimal(10, 6)
-  durationMs Int              @default(0)
-  error      String?
-  createdAt  DateTime         @default(now())
-  updatedAt  DateTime         @updatedAt
+  id                 String           @id @default(cuid())
+  userId             String?
+  user               User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  status             GenerationStatus @default(QUEUED)
+  provider           String           @default("openai")
+  model              String           @default("gpt-image-2")
+  quality            String           @default("medium")
+  imageSize          String           @default("1024x1024")
+  category           String
+  sceneId            String
+  brief              String?
+  inputKey           String
+  outputKeys         String[]         @default([])
+  requestedVariants  Int              @default(1)
+  inputTokens        Int              @default(0)
+  inputTextTokens    Int              @default(0)
+  inputImageTokens   Int              @default(0)
+  outputTokens       Int              @default(0)
+  totalTokens        Int              @default(0)
+  providerUsageUnits Decimal          @default(0) @db.Decimal(12, 2)
+  providerUsageUnit  String           @default("tokens")
+  costUsd            Decimal          @default(0) @db.Decimal(10, 6)
+  durationMs         Int              @default(0)
+  error              String?
+  errorCode          String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   @@index([createdAt])
   @@index([status])
+  @@index([userId])
+  @@index([provider, createdAt])
   @@map("generation_runs")
+}
+
+model WaitlistSubscriber {
+  id        String   @id @default(cuid())
+  email     String?  @unique
+  phone     String?  @unique
+  locale    String   @default("en")
+  source    String   @default("landing")
+  offerCode String   @default("launch_free_week")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+  @@map("waitlist_subscribers")
 }

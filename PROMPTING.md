@@ -3,6 +3,10 @@
 Scene presets live in `apps/api/src/generation/styles.config.ts`. The config is typed so each category
 has exactly three scenes and every prompt template contains the `{FIDELITY_BLOCK}` slot.
 
+Aluna sends the source image and composed prompt through the selected image-edit provider. Cloudflare
+FLUX.2 Klein 9B is the default demo engine; GPT Image 2 remains optional. Keep provider, model,
+quality, image size, and source fixtures fixed while comparing prompt revisions.
+
 ## Add or edit a scene
 
 1. Keep the shared `FIDELITY_BLOCK` intact. It is the cross-category contract for shape, color,
@@ -24,6 +28,11 @@ variation between outputs. A visually attractive result is still a failure if pr
 
 Change one prompt idea at a time. Keep source images, model ID, scene, variant count, and relevant
 environment settings fixed so comparisons remain useful.
+
+For cross-provider evaluation, create a separate baseline rather than mixing results into one prompt
+iteration. FLUX reference prompts should explicitly call the uploaded source “Image 0.” Pay special
+attention to small label text, logos, garment prints, and exact package geometry; realism without
+identity fidelity is a failed result.
 
 ## Iteration log
 

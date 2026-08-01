@@ -1,6 +1,7 @@
 node_modules/
 .pnpm-store/
 .next/
+*.tsbuildinfo
 dist/
 coverage/
 .env
@@ -9,5 +10,6 @@ output/
 outputs/
 uploads/
 work/
+.vercel/
 *.log
 .DS_Store

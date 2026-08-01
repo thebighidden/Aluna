@@ -97,6 +97,8 @@ export class GenerationsEventsService implements OnModuleInit, OnModuleDestroy {
         status: event,
         outputKeys: generation.outputKeys,
         costUsd: Number(generation.costUsd),
+        providerUsageUnits: Number(generation.providerUsageUnits),
+        providerUsageUnit: generation.providerUsageUnit,
         durationMs: generation.durationMs,
         error: generation.error,
       });

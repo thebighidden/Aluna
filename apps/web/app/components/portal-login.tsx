@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useState } from 'react';
 import { LanguageToggle, useLanguagePreference } from './language-toggle';
+import { login } from '../lib/auth-client';
 
 type PortalLoginProps = {
   portal: 'studio' | 'dashboard';
@@ -14,12 +15,10 @@ const portalMedia = {
   studio: {
     destination: '/studio',
     image: '/images/aluna-dashboard-login-operations.png',
-    alternateHref: '/admin/login',
   },
   dashboard: {
     destination: '/admin',
     image: '/images/aluna-studio-login-fashion.png',
-    alternateHref: '/studio/login',
   },
 } as const;
 
@@ -34,8 +33,6 @@ const portalCopy = {
     remember: 'Remember me',
     forgot: 'Forgot password?',
     opening: 'Opening workspace…',
-    demo: 'Demo access: any valid email and four-character password will continue.',
-    switchLead: 'Looking for the other workspace?',
     copyright: '© 2026 Aluna Studio',
     visualHeadline: (
       <>
@@ -52,7 +49,6 @@ const portalCopy = {
       button: 'Continue to Studio',
       imageAlt: 'Professional camera and lighting equipment in a violet product photography studio',
       imageLabel: 'Studio setup / Camera',
-      alternateLabel: 'Admin access',
     },
     dashboard: {
       eyebrow: 'Operations workspace',
@@ -62,7 +58,6 @@ const portalCopy = {
       button: 'Continue to Dashboard',
       imageAlt: 'Woman in an ivory jacket and violet tailoring in a professional fashion studio',
       imageLabel: 'Campaign / Fashion',
-      alternateLabel: 'Studio access',
     },
   },
   fr: {
@@ -75,7 +70,8 @@ const portalCopy = {
     remember: 'Se souvenir de moi',
     forgot: 'Mot de passe oublié ?',
     opening: 'Ouverture de l’espace…',
-    demo: 'Accès démo : utilisez un e-mail valide et un mot de passe de quatre caractères minimum.',
+    demo: 'L’accès démo est prêt avec un compte propriétaire préconfiguré.',
+    useDemo: 'Utiliser le compte démo',
     switchLead: 'Vous cherchez l’autre espace ?',
     copyright: '© 2026 Aluna Studio',
     visualHeadline: (
@@ -106,20 +102,71 @@ const portalCopy = {
       alternateLabel: 'Accès Studio',
     },
   },
+  ar: {
+    languageLabel: 'اختار اللغة',
+    back: 'رجع للرئيسية',
+    email: 'إيميل الخدمة',
+    emailPlaceholder: 'you@company.com',
+    password: 'كلمة السر',
+    passwordPlaceholder: 'دخل كلمة السر',
+    remember: 'بقا فاكرني',
+    forgot: 'نسيتي كلمة السر؟',
+    opening: 'كنفتحو مساحة الخدمة…',
+    demo: 'حساب الديمو واجد باش تجرب المنصة.',
+    useDemo: 'استعمل حساب الديمو',
+    switchLead: 'كتقلب على المساحة الأخرى؟',
+    copyright: '© 2026 Aluna Studio',
+    visualHeadline: (
+      <>
+        صورة وحدة.
+        <br />
+        كل الحملات.
+      </>
+    ),
+    studio: {
+      eyebrow: 'مساحة الإبداع',
+      title: 'دخل لـ Aluna Studio.',
+      description: 'صايب حملات موضة فوق موديل وتصاور منتوجات احترافية من صورة أصلية وحدة.',
+      button: 'كمّل للستوديو',
+      imageAlt: 'كاميرا وضو احترافيين فستوديو بنفسجي لتصوير المنتوجات',
+      imageLabel: 'الستوديو / الكاميرا',
+      alternateLabel: 'دخول الإدارة',
+    },
+    dashboard: {
+      eyebrow: 'مساحة التسيير',
+      title: 'دخل للداشبورد.',
+      description: 'تابع الصور، أداء الحملات، مصاريف الخدمة وصحة مساحة العمل ديالك.',
+      button: 'كمّل للداشبورد',
+      imageAlt: 'موديل لابسة جاكيطة بيضاء ولباس بنفسجي فستوديو موضة احترافي',
+      imageLabel: 'حملة / موضة',
+      alternateLabel: 'دخول الستوديو',
+    },
+  },
 } as const;
 
 export function PortalLogin({ portal }: PortalLoginProps) {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [remember, setRemember] = useState(true);
+  const [error, setError] = useState<string>();
   const [language, setLanguage] = useLanguagePreference();
   const media = portalMedia[portal];
   const commonCopy = portalCopy[language];
   const content = commonCopy[portal];
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setIsSubmitting(true);
-    router.push(media.destination);
+    setError(undefined);
+    try {
+      await login(email, password, remember);
+      router.push(media.destination);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : 'Could not sign in');
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -155,6 +202,8 @@ export function PortalLogin({ portal }: PortalLoginProps) {
                 placeholder={commonCopy.emailPlaceholder}
                 required
                 type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
               />
             </label>
             <label>
@@ -166,11 +215,18 @@ export function PortalLogin({ portal }: PortalLoginProps) {
                 placeholder={commonCopy.passwordPlaceholder}
                 required
                 type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
               />
             </label>
             <div className="portal-login-options">
               <label>
-                <input name="remember" type="checkbox" />
+                <input
+                  checked={remember}
+                  name="remember"
+                  type="checkbox"
+                  onChange={(event) => setRemember(event.target.checked)}
+                />
                 {commonCopy.remember}
               </label>
               <button type="button">{commonCopy.forgot}</button>
@@ -180,10 +236,11 @@ export function PortalLogin({ portal }: PortalLoginProps) {
             </button>
           </form>
 
-          <p className="portal-login-demo">{commonCopy.demo}</p>
-          <p className="portal-login-switch">
-            {commonCopy.switchLead} <Link href={media.alternateHref}>{content.alternateLabel}</Link>
-          </p>
+          {error && (
+            <p className="portal-login-error" role="alert">
+              {error}
+            </p>
+          )}
         </div>
 
         <small>{commonCopy.copyright}</small>

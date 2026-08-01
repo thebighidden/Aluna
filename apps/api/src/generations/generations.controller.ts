@@ -3,20 +3,30 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   MessageEvent,
+  NotFoundException,
   Param,
+  ParseIntPipe,
   Post,
+  Req,
   Sse,
+  StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { GenerationStatus } from '@prisma/client';
+import { Generation, GenerationStatus } from '@prisma/client';
 import { Queue } from 'bullmq';
+import { lookup } from 'mime-types';
 import { randomUUID } from 'node:crypto';
 import { memoryStorage } from 'multer';
 import { Observable } from 'rxjs';
-import { getScene, isProductCategory } from '../generation/styles.config';
+import { Permission } from '../auth/auth.constants';
+import { RequestWithUser } from '../auth/auth-user.interface';
+import { Permissions } from '../auth/decorators/permissions.decorator';
+import { GenerationService } from '../generation/generation.service';
+import { getScene, isProductCategory, STYLES_CONFIG } from '../generation/styles.config';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateGenerationDto } from './dto/create-generation.dto';
@@ -30,9 +40,39 @@ export class GenerationsController {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly events: GenerationsEventsService,
+    private readonly generationService: GenerationService,
   ) {}
 
+  @Get('presets')
+  @Permissions(Permission.PresetRead)
+  presets() {
+    return Object.entries(STYLES_CONFIG).map(([id, category]) => ({
+      id,
+      label: category.label,
+      scenes: category.scenes.map(({ id: sceneId, name }) => ({ id: sceneId, name })),
+    }));
+  }
+
+  @Get('configuration')
+  @Permissions(Permission.PresetRead)
+  configuration() {
+    return this.generationService.getRuntimeConfiguration();
+  }
+
+  @Get()
+  @Permissions(Permission.GenerationReadOwn)
+  async list(@Req() request: RequestWithUser) {
+    const canReadAll = request.user.permissions.includes(Permission.GenerationReadAll);
+    const generations = await this.prisma.generation.findMany({
+      where: canReadAll ? undefined : { userId: request.user.id },
+      orderBy: { createdAt: 'desc' },
+      take: 40,
+    });
+    return generations.map((generation) => this.serializeGeneration(generation));
+  }
+
   @Post()
+  @Permissions(Permission.GenerationCreate)
   @UseInterceptors(
     FileInterceptor('image', {
       storage: memoryStorage(),
@@ -48,9 +88,17 @@ export class GenerationsController {
     }),
   )
   async create(
+    @Req() request: RequestWithUser,
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() dto: CreateGenerationDto,
-  ): Promise<{ id: string; status: string; eventsUrl: string }> {
+  ): Promise<{
+    id: string;
+    status: string;
+    provider: string;
+    model: string;
+    statusUrl: string;
+    eventsUrl: string;
+  }> {
     if (!file) throw new BadRequestException('A multipart image field named "image" is required');
     if (!isProductCategory(dto.category) || !getScene(dto.category, dto.sceneId)) {
       throw new BadRequestException(
@@ -59,6 +107,7 @@ export class GenerationsController {
     }
 
     const generationId = randomUUID();
+    const runtime = this.generationService.getRuntimeConfiguration();
     const inputKey = await this.storage.putInput(
       generationId,
       file.originalname,
@@ -68,11 +117,18 @@ export class GenerationsController {
     await this.prisma.generation.create({
       data: {
         id: generationId,
-        userId: 'user_demo',
+        userId: request.user.id,
+        provider: runtime.provider,
+        model: runtime.model,
+        quality: runtime.quality,
+        imageSize: runtime.imageSize,
+        providerUsageUnit: runtime.usageUnit,
         status: GenerationStatus.QUEUED,
         category: dto.category,
         sceneId: dto.sceneId,
+        brief: dto.brief?.trim() || null,
         inputKey,
+        requestedVariants: dto.variants,
       },
     });
 
@@ -81,10 +137,12 @@ export class GenerationsController {
         'generate',
         {
           generationId,
+          userId: request.user.id,
           inputKey,
           category: dto.category,
           sceneId: dto.sceneId,
           variants: dto.variants,
+          brief: dto.brief?.trim() || undefined,
         },
         {
           jobId: generationId,
@@ -108,12 +166,85 @@ export class GenerationsController {
     return {
       id: generationId,
       status: 'queued',
+      provider: runtime.provider,
+      model: runtime.model,
+      statusUrl: `/generations/${generationId}`,
       eventsUrl: `/generations/${generationId}/events`,
     };
   }
 
+  @Get(':id')
+  @Permissions(Permission.GenerationReadOwn)
+  async get(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const generation = await this.getAccessibleGeneration(request, id);
+    return this.serializeGeneration(generation);
+  }
+
+  @Get(':id/results/:index')
+  @Permissions(Permission.AssetRead)
+  async result(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Param('index', ParseIntPipe) index: number,
+  ): Promise<StreamableFile> {
+    const generation = await this.getAccessibleGeneration(request, id);
+    const key = generation.outputKeys[index - 1];
+    if (!key) throw new NotFoundException(`Result ${index} was not found`);
+    const body = await this.storage.get(key);
+    const type = lookup(key) || 'image/png';
+    return new StreamableFile(body, {
+      type,
+      disposition: `inline; filename="aluna-${id}-${String(index).padStart(2, '0')}"`,
+    });
+  }
+
   @Sse(':id/events')
-  stream(@Param('id') id: string): Observable<MessageEvent> {
+  @Permissions(Permission.GenerationReadOwn)
+  async stream(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+  ): Promise<Observable<MessageEvent>> {
+    await this.getAccessibleGeneration(request, id);
     return this.events.stream(id);
+  }
+
+  private async getAccessibleGeneration(request: RequestWithUser, id: string): Promise<Generation> {
+    const canReadAll = request.user.permissions.includes(Permission.GenerationReadAll);
+    const generation = await this.prisma.generation.findFirst({
+      where: { id, ...(canReadAll ? {} : { userId: request.user.id }) },
+    });
+    if (!generation) throw new NotFoundException(`Generation "${id}" was not found`);
+    return generation;
+  }
+
+  private serializeGeneration(generation: Generation) {
+    return {
+      id: generation.id,
+      status: generation.status.toLowerCase(),
+      provider: generation.provider,
+      model: generation.model,
+      quality: generation.quality,
+      imageSize: generation.imageSize,
+      category: generation.category,
+      sceneId: generation.sceneId,
+      brief: generation.brief,
+      outputKeys: generation.outputKeys,
+      requestedVariants: generation.requestedVariants,
+      resultUrls: generation.outputKeys.map(
+        (_key, index) => `/generations/${generation.id}/results/${index + 1}`,
+      ),
+      costUsd: Number(generation.costUsd),
+      inputTokens: generation.inputTokens,
+      inputTextTokens: generation.inputTextTokens,
+      inputImageTokens: generation.inputImageTokens,
+      outputTokens: generation.outputTokens,
+      totalTokens: generation.totalTokens,
+      providerUsageUnits: Number(generation.providerUsageUnits),
+      providerUsageUnit: generation.providerUsageUnit,
+      durationMs: generation.durationMs,
+      error: generation.error,
+      errorCode: generation.errorCode,
+      createdAt: generation.createdAt,
+    };
   }
 }

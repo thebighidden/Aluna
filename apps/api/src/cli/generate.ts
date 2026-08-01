@@ -59,11 +59,6 @@ function parseArguments(): CliArguments {
 async function main(): Promise<void> {
   const args = parseArguments();
   loadEnv({ path: ['.env', 'apps/api/.env'], quiet: true });
-  if (!process.env.GEMINI_API_KEY?.trim()) {
-    throw new Error(
-      'GEMINI_API_KEY is missing; copy apps/api/.env.example to apps/api/.env and add a Gemini API key',
-    );
-  }
   await access(args.image).catch(() => {
     throw new Error(`Input image not found: ${args.image}`);
   });
@@ -78,6 +73,13 @@ async function main(): Promise<void> {
   });
   try {
     const service = app.get(GenerationService);
+    const runtime = service.getRuntimeConfiguration();
+    if (!runtime.configured) {
+      throw new Error(
+        `${runtime.providerLabel} is not configured; add ${runtime.missingConfiguration.join(' and ')} to apps/api/.env`,
+      );
+    }
+    console.log(`Provider: ${runtime.providerLabel} · ${runtime.model}`);
     const result = await service.generate({
       imagePath: args.image,
       category: args.category,

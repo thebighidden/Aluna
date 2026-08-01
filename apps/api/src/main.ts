@@ -16,6 +16,12 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   const config = app.get(ConfigService);
+  const corsOrigins = config
+    .getOrThrow<string>('CORS_ORIGINS')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  app.enableCors({ origin: corsOrigins });
   const port = config.getOrThrow<number>('PORT');
   await app.listen(port);
   console.log(`API listening on http://localhost:${port}`);

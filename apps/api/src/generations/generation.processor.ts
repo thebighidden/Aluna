@@ -8,7 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { GENERATION_QUEUE, GenerationJobData } from './generation-queue.constants';
 
-@Processor(GENERATION_QUEUE, { concurrency: 2 })
+@Processor(GENERATION_QUEUE, { concurrency: 1 })
 export class GenerationProcessor extends WorkerHost {
   private readonly logger = new Logger(GenerationProcessor.name);
 
@@ -21,7 +21,7 @@ export class GenerationProcessor extends WorkerHost {
   }
 
   async process(job: Job<GenerationJobData>): Promise<{ outputKeys: string[] }> {
-    const { generationId, inputKey, category, sceneId, variants } = job.data;
+    const { generationId, inputKey, category, sceneId, variants, brief } = job.data;
     if (!isProductCategory(category)) {
       throw new Error(`Queued job contains unknown category "${category}"`);
     }
@@ -41,6 +41,7 @@ export class GenerationProcessor extends WorkerHost {
           category,
           sceneId,
           variants,
+          brief,
         },
         {
           runId: generationId,
@@ -54,6 +55,8 @@ export class GenerationProcessor extends WorkerHost {
               key: variant.key,
               costUsd: variant.costUsd,
               durationMs: variant.durationMs,
+              providerUnits: variant.usage.providerUnits,
+              providerUnit: variant.usage.providerUnit,
             });
           },
         },

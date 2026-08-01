@@ -7,6 +7,11 @@ import '@clr/city/css/semibold.css';
 import '@clr/city/css/bold.css';
 import '@clr/city/css/extra-bold.css';
 import '@clr/city/css/black.css';
+import '@fontsource/tajawal/400.css';
+import '@fontsource/tajawal/500.css';
+import '@fontsource/tajawal/700.css';
+import '@fontsource/tajawal/800.css';
+import '@fontsource/tajawal/900.css';
 import './globals.css';
 
 export const metadata: Metadata = {
