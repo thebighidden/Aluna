@@ -1,14 +1,10 @@
 'use client';
 
-/* eslint-disable @next/next/no-img-element */
-import { gsap } from 'gsap';
-import { ScrollTrigger } from 'gsap/ScrollTrigger';
+import Image from 'next/image';
 import Link from 'next/link';
-import { FormEvent, useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { LanguageToggle, useLanguagePreference } from './components/language-toggle';
 import type { LocalizedText } from './components/language-toggle';
-
-gsap.registerPlugin(ScrollTrigger);
 
 const localized = (en: string, fr: string, ar: string): LocalizedText => ({ en, fr, ar });
 
@@ -17,21 +13,21 @@ const directions = [
     index: '01',
     type: localized('Clothing / On-model', 'Vêtements / Sur mannequin', 'الملابس / على موديل'),
     title: localized('Worn, not staged', 'Porté, jamais posé', 'ملبوسة، ماشي غير معروضة'),
-    image: '/images/aluna-shirt-model.png',
+    image: '/images/aluna-shirt-model.webp',
     className: 'aluna-work-card--serum',
   },
   {
     index: '02',
     type: localized('Footwear / Launch', 'Chaussures / Lancement', 'الصبابط / إطلاق'),
     title: localized('Electric motion', 'Mouvement électrique', 'حركة بطاقة قوية'),
-    image: '/images/aluna-sneaker-campaign.png',
+    image: '/images/aluna-sneaker-campaign.webp',
     className: 'aluna-work-card--sneaker',
   },
   {
     index: '03',
     type: localized('Cosmetics / Campaign', 'Cosmétiques / Campagne', 'التجميل / حملة'),
     title: localized('Beauty in focus', 'La beauté en lumière', 'الجمال فالصورة'),
-    image: '/images/aluna-makeup-model.png',
+    image: '/images/aluna-makeup-model.webp',
     className: 'aluna-work-card--beauty',
   },
 ];
@@ -84,8 +80,8 @@ const comparisons = [
       'Importez une simple photo du vêtement. Aluna conserve la coupe, la couleur, la matière, les coutures et l’imprimé tout en le plaçant naturellement sur un mannequin.',
       'حمّل تصويرة بسيطة ديال اللبسة. Aluna كيحافظ على القصة، اللون، الثوب، الخياطة والطباعة وكيبيّنها طبيعية فوق موديل.',
     ),
-    before: '/images/aluna-shirt-before.png',
-    after: '/images/aluna-shirt-model.png',
+    before: '/images/aluna-shirt-before.webp',
+    after: '/images/aluna-shirt-model.webp',
     beforeAlt: 'Black crescent T-shirt laid flat for a normal product photo',
     afterAlt: 'Young man wearing the same black crescent T-shirt in a fashion campaign',
   },
@@ -106,8 +102,8 @@ const comparisons = [
       'Partez d’une photo prise au téléphone. Aluna retire l’arrière-plan et recrée la lumière, la surface et l’atmosphère autour du flacon exact.',
       'بدا بتصويرة عادية بالتليفون. Aluna كيحيد الخلفية وكيعاود يبني الضو، السطح والجو حول نفس القنينة بلا ما يبدلها.',
     ),
-    before: '/images/aluna-perfume-before.png',
-    after: '/images/aluna-perfume-studio.png',
+    before: '/images/aluna-perfume-before.webp',
+    after: '/images/aluna-perfume-studio.webp',
     beforeAlt: 'Ordinary phone snapshot of a perfume bottle on a bathroom counter',
     afterAlt: 'The same perfume bottle photographed in a professional violet studio',
   },
@@ -516,9 +512,16 @@ function BeforeAfter({
 
   return (
     <div className="aluna-compare-frame">
-      <img className="aluna-compare-base" src={before} alt={beforeAlt} />
+      <Image
+        className="aluna-compare-base"
+        src={before}
+        alt={beforeAlt}
+        fill
+        quality={82}
+        sizes="(max-width: 900px) 92vw, 58vw"
+      />
       <div className="aluna-compare-after" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}>
-        <img src={after} alt={afterAlt} />
+        <Image src={after} alt={afterAlt} fill quality={82} sizes="(max-width: 900px) 92vw, 58vw" />
       </div>
       <span className="aluna-compare-label aluna-compare-label--before">{beforeLabel}</span>
       <span className="aluna-compare-label aluna-compare-label--after">{afterLabel}</span>
@@ -567,80 +570,100 @@ export default function LandingPage() {
     }
   };
 
-  useLayoutEffect(() => {
-    const context = gsap.context(() => {
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        gsap.set('[data-animate]', { clearProps: 'all' });
-        return;
-      }
+  useEffect(() => {
+    let cancelled = false;
+    let revertAnimations: () => void = () => undefined;
 
-      const intro = gsap.timeline({ defaults: { ease: 'power3.out' } });
-      intro
-        .from('.aluna-nav', { y: -24, opacity: 0, duration: 0.8 })
-        .from(
-          '.aluna-eyebrow, .aluna-hero-title .line, .aluna-hero-copy, .aluna-hero-actions',
-          { y: 52, opacity: 0, duration: 0.95, stagger: 0.1 },
-          '-=0.35',
-        )
-        .from(
-          '.aluna-hero-media',
-          { clipPath: 'inset(50% 50% 50% 50% round 40px)', scale: 0.92, duration: 1.25 },
-          '-=1',
-        )
-        .from('.aluna-hero-note', { y: 20, opacity: 0, duration: 0.65 }, '-=0.45');
+    const setupAnimations = async () => {
+      const [{ gsap }, { ScrollTrigger }] = await Promise.all([
+        import('gsap'),
+        import('gsap/ScrollTrigger'),
+      ]);
 
-      gsap.to('.aluna-hero-media img', {
-        yPercent: 10,
-        ease: 'none',
-        scrollTrigger: {
-          trigger: '.aluna-hero',
-          start: 'top top',
-          end: 'bottom top',
-          scrub: 0.8,
-        },
-      });
+      if (cancelled) return;
 
-      gsap.utils.toArray<HTMLElement>('[data-reveal]').forEach((element) => {
-        gsap.from(element, {
-          y: 64,
+      gsap.registerPlugin(ScrollTrigger);
+      const context = gsap.context(() => {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          gsap.set('[data-animate]', { clearProps: 'all' });
+          return;
+        }
+
+        const intro = gsap.timeline({ defaults: { ease: 'power3.out' } });
+        intro
+          .from('.aluna-nav', { y: -24, opacity: 0, duration: 0.8 })
+          .from(
+            '.aluna-eyebrow, .aluna-hero-title .line, .aluna-hero-copy, .aluna-hero-actions',
+            { y: 52, opacity: 0, duration: 0.95, stagger: 0.1 },
+            '-=0.35',
+          )
+          .from(
+            '.aluna-hero-media',
+            { clipPath: 'inset(50% 50% 50% 50% round 40px)', scale: 0.92, duration: 1.25 },
+            '-=1',
+          )
+          .from('.aluna-hero-note', { y: 20, opacity: 0, duration: 0.65 }, '-=0.45');
+
+        gsap.to('.aluna-hero-media img', {
+          yPercent: 10,
+          ease: 'none',
+          scrollTrigger: {
+            trigger: '.aluna-hero',
+            start: 'top top',
+            end: 'bottom top',
+            scrub: 0.8,
+          },
+        });
+
+        gsap.utils.toArray<HTMLElement>('[data-reveal]').forEach((element) => {
+          gsap.from(element, {
+            y: 64,
+            opacity: 0,
+            duration: 1,
+            ease: 'power3.out',
+            scrollTrigger: {
+              trigger: element,
+              start: 'top 88%',
+              once: true,
+            },
+          });
+        });
+
+        gsap.from('.aluna-work-card', {
+          y: 90,
           opacity: 0,
-          duration: 1,
+          rotate: (index) => (index - 1) * 2,
+          duration: 1.05,
+          stagger: 0.14,
           ease: 'power3.out',
           scrollTrigger: {
-            trigger: element,
-            start: 'top 88%',
+            trigger: '.aluna-work-grid',
+            start: 'top 78%',
             once: true,
           },
         });
-      });
 
-      gsap.from('.aluna-work-card', {
-        y: 90,
-        opacity: 0,
-        rotate: (index) => (index - 1) * 2,
-        duration: 1.05,
-        stagger: 0.14,
-        ease: 'power3.out',
-        scrollTrigger: {
-          trigger: '.aluna-work-grid',
-          start: 'top 78%',
-          once: true,
-        },
-      });
+        gsap.to('.aluna-fidelity-image img', {
+          scale: 1.08,
+          ease: 'none',
+          scrollTrigger: {
+            trigger: '.aluna-fidelity',
+            start: 'top bottom',
+            end: 'bottom top',
+            scrub: 1,
+          },
+        });
+      }, root);
 
-      gsap.to('.aluna-fidelity-image img', {
-        scale: 1.08,
-        ease: 'none',
-        scrollTrigger: {
-          trigger: '.aluna-fidelity',
-          start: 'top bottom',
-          end: 'bottom top',
-          scrub: 1,
-        },
-      });
-    }, root);
+      revertAnimations = () => context.revert();
+    };
 
-    return () => context.revert();
+    void setupAnimations();
+
+    return () => {
+      cancelled = true;
+      revertAnimations();
+    };
   }, []);
 
   return (
@@ -701,7 +724,14 @@ export default function LandingPage() {
 
         <div className="aluna-hero-visual">
           <div className="aluna-hero-media" data-animate>
-            <img src="/images/aluna-shirt-model.png" alt={copy.hero.imageAlt} />
+            <Image
+              src="/images/aluna-shirt-model.webp"
+              alt={copy.hero.imageAlt}
+              fill
+              priority
+              quality={86}
+              sizes="(max-width: 900px) 92vw, 48vw"
+            />
             <div className="aluna-image-tag">
               <span>{copy.hero.imageLabel}</span>
               <strong>{copy.hero.imageCategory}</strong>
@@ -778,7 +808,13 @@ export default function LandingPage() {
           {directions.map((direction) => (
             <article className={`aluna-work-card ${direction.className}`} key={direction.index}>
               <div className="aluna-work-image">
-                <img src={direction.image} alt={`${direction.title[language]} product campaign`} />
+                <Image
+                  src={direction.image}
+                  alt={`${direction.title[language]} product campaign`}
+                  fill
+                  quality={82}
+                  sizes="(max-width: 900px) 92vw, 48vw"
+                />
                 <span>{copy.work.view}</span>
               </div>
               <div className="aluna-work-caption">
@@ -815,7 +851,13 @@ export default function LandingPage() {
 
       <section className="aluna-fidelity" id="fidelity">
         <div className="aluna-fidelity-image">
-          <img src="/images/aluna-perfume-studio.png" alt={copy.fidelity.imageAlt} />
+          <Image
+            src="/images/aluna-perfume-studio.webp"
+            alt={copy.fidelity.imageAlt}
+            fill
+            quality={82}
+            sizes="(max-width: 900px) 100vw, 52vw"
+          />
           <span className="aluna-scan aluna-scan--shape">{copy.fidelity.shape}</span>
           <span className="aluna-scan aluna-scan--material">{copy.fidelity.material}</span>
           <span className="aluna-scan aluna-scan--color">{copy.fidelity.color}</span>

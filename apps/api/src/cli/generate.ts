@@ -49,8 +49,8 @@ function parseArguments(): CliArguments {
   }
 
   const variants = Number(variantsRaw);
-  if (!Number.isInteger(variants) || variants < 1 || variants > 8) {
-    throw new Error('--variants must be an integer between 1 and 8');
+  if (!Number.isInteger(variants) || variants < 1 || variants > 12) {
+    throw new Error('--variants must be an integer between 1 and 12');
   }
 
   return { image: resolve(image), category, scene, variants };

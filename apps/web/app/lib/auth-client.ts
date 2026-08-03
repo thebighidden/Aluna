@@ -6,7 +6,7 @@ export type StudioUser = {
   id: string;
   email: string;
   name: string;
-  role: 'OWNER' | 'ADMIN' | 'CREATOR' | 'VIEWER';
+  role: 'SUPER_ADMIN' | 'USER';
   permissions: string[];
 };
 

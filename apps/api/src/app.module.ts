@@ -11,6 +11,8 @@ import { StorageModule } from './storage/storage.module';
 import { WaitlistModule } from './waitlist/waitlist.module';
 import { UsersModule } from './users/users.module';
 import { AdminModule } from './admin/admin.module';
+import { AnalyticsModule } from './analytics/analytics.module';
+import { HealthController } from './health/health.controller';
 
 @Module({
   imports: [
@@ -27,6 +29,7 @@ import { AdminModule } from './admin/admin.module';
     }),
     PrismaModule,
     AuthModule,
+    AnalyticsModule,
     AdminModule,
     StorageModule,
     GenerationModule,
@@ -34,5 +37,6 @@ import { AdminModule } from './admin/admin.module';
     WaitlistModule,
     UsersModule,
   ],
+  controllers: [HealthController],
 })
 export class AppModule {}

@@ -34,6 +34,20 @@ iteration. FLUX reference prompts should explicitly call the uploaded source “
 attention to small label text, logos, garment prints, and exact package geometry; realism without
 identity fidelity is a failed result.
 
+## Creative controls and unique casting
+
+Studio controls live in `apps/api/src/generation/campaign-options.config.ts`. Add a choice there with
+a stable ID, concise customer label, and a complete prompt sentence. Defaults are stored with each
+generation in `creativeOptions`, so do not rename an ID casually after launch.
+
+For clothing, model-casting and performance controls are applied only when `presentation` is
+`on-model`. Every variant also receives a run-specific fingerprint and provider seed. The prompt uses
+that fingerprint to select a new fictional adult identity, facial structure, natural skin detail,
+camera nuance, and lighting nuance. These values prevent a reusable default face or scene from
+becoming the product's visual identity; they are not a mathematical guarantee that two providers can
+never produce similar people. Evaluate facial and compositional similarity across a large batch when
+changing these rules.
+
 ## Iteration log
 
 Add one row per experiment. Use output keys or a run ID so the evidence can be recovered.

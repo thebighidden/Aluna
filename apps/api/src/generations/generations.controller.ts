@@ -25,6 +25,7 @@ import { Observable } from 'rxjs';
 import { Permission } from '../auth/auth.constants';
 import { RequestWithUser } from '../auth/auth-user.interface';
 import { Permissions } from '../auth/decorators/permissions.decorator';
+import { campaignOptionGroups, parseCampaignOptions } from '../generation/campaign-options.config';
 import { GenerationService } from '../generation/generation.service';
 import { getScene, isProductCategory, STYLES_CONFIG } from '../generation/styles.config';
 import { PrismaService } from '../prisma/prisma.service';
@@ -50,6 +51,7 @@ export class GenerationsController {
       id,
       label: category.label,
       scenes: category.scenes.map(({ id: sceneId, name }) => ({ id: sceneId, name })),
+      optionGroups: campaignOptionGroups(id as keyof typeof STYLES_CONFIG),
     }));
   }
 
@@ -106,6 +108,13 @@ export class GenerationsController {
       );
     }
 
+    let creativeOptions: Record<string, string>;
+    try {
+      creativeOptions = parseCampaignOptions(dto.category, dto.options);
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : String(error));
+    }
+
     const generationId = randomUUID();
     const runtime = this.generationService.getRuntimeConfiguration();
     const inputKey = await this.storage.putInput(
@@ -118,6 +127,8 @@ export class GenerationsController {
       data: {
         id: generationId,
         userId: request.user.id,
+        ownerName: request.user.name,
+        ownerEmail: request.user.email,
         provider: runtime.provider,
         model: runtime.model,
         quality: runtime.quality,
@@ -127,6 +138,7 @@ export class GenerationsController {
         category: dto.category,
         sceneId: dto.sceneId,
         brief: dto.brief?.trim() || null,
+        creativeOptions,
         inputKey,
         requestedVariants: dto.variants,
       },
@@ -143,6 +155,7 @@ export class GenerationsController {
           sceneId: dto.sceneId,
           variants: dto.variants,
           brief: dto.brief?.trim() || undefined,
+          options: creativeOptions,
         },
         {
           jobId: generationId,
@@ -198,6 +211,18 @@ export class GenerationsController {
     });
   }
 
+  @Get(':id/input')
+  @Permissions(Permission.AssetRead)
+  async input(@Req() request: RequestWithUser, @Param('id') id: string): Promise<StreamableFile> {
+    const generation = await this.getAccessibleGeneration(request, id);
+    const body = await this.storage.get(generation.inputKey);
+    const type = lookup(generation.inputKey) || 'image/jpeg';
+    return new StreamableFile(body, {
+      type,
+      disposition: `inline; filename="aluna-${id}-source"`,
+    });
+  }
+
   @Sse(':id/events')
   @Permissions(Permission.GenerationReadOwn)
   async stream(
@@ -228,6 +253,8 @@ export class GenerationsController {
       category: generation.category,
       sceneId: generation.sceneId,
       brief: generation.brief,
+      creativeOptions: generation.creativeOptions,
+      inputUrl: `/generations/${generation.id}/input`,
       outputKeys: generation.outputKeys,
       requestedVariants: generation.requestedVariants,
       resultUrls: generation.outputKeys.map(

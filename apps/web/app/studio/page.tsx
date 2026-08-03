@@ -18,11 +18,11 @@ import {
   PanelLeftClose,
   Plus,
   Settings,
+  Shuffle,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Upload,
-  Users,
   WandSparkles,
   X,
   type LucideIcon,
@@ -32,11 +32,29 @@ import { useRouter } from 'next/navigation';
 import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { apiErrorMessage, authFetch, currentUser, logout, StudioUser } from '../lib/auth-client';
 
-type StudioSection =
-  'create' | 'campaigns' | 'library' | 'presets' | 'history' | 'team' | 'settings';
+type StudioSection = 'create' | 'campaigns' | 'library' | 'presets' | 'history' | 'settings';
 
 type ScenePreset = { id: string; name: string };
-type CategoryPreset = { id: string; label: string; scenes: ScenePreset[] };
+type CampaignOptionChoice = { id: string; label: string; description: string };
+type CampaignOptionDefinition = {
+  id: string;
+  label: string;
+  description: string;
+  defaultValue: string;
+  choices: CampaignOptionChoice[];
+};
+type CampaignOptionGroup = {
+  id: string;
+  label: string;
+  description: string;
+  options: CampaignOptionDefinition[];
+};
+type CategoryPreset = {
+  id: string;
+  label: string;
+  scenes: ScenePreset[];
+  optionGroups?: CampaignOptionGroup[];
+};
 type GenerationStatus = 'queued' | 'analyzing' | 'generating' | 'done' | 'failed';
 
 type Generation = {
@@ -47,6 +65,7 @@ type Generation = {
   category: string;
   sceneId: string;
   brief: string | null;
+  creativeOptions?: Record<string, string> | null;
   outputKeys: string[];
   resultUrls: string[];
   costUsd: number;
@@ -57,6 +76,45 @@ type Generation = {
   providerUsageUnit?: string;
   createdAt: string;
 };
+
+const clothingOptionDefaults: Record<string, string> = {
+  presentation: 'on-model',
+  modelGender: 'varied',
+  modelAge: '25-34',
+  modelHeritage: 'global-mix',
+  bodyBuild: 'varied',
+  hairDirection: 'varied',
+  expression: 'confident',
+  castingDiversity: 'unique-each',
+  pose: 'varied',
+  framing: 'three-quarter',
+  campaignMood: 'scene-led',
+  composition: 'vary',
+  camera: 'vary',
+  lighting: 'scene-led',
+  palette: 'scene-led',
+  variationStrength: 'balanced',
+};
+
+const sharedOptionDefaults: Record<string, string> = {
+  campaignMood: 'scene-led',
+  composition: 'vary',
+  camera: 'vary',
+  lighting: 'scene-led',
+  palette: 'scene-led',
+  variationStrength: 'balanced',
+};
+
+function defaultsForCategory(category?: CategoryPreset): Record<string, string> {
+  if (!category?.optionGroups?.length) {
+    return { ...(category?.id === 'clothing' ? clothingOptionDefaults : sharedOptionDefaults) };
+  }
+  return Object.fromEntries(
+    category.optionGroups.flatMap((group) =>
+      group.options.map((definition) => [definition.id, definition.defaultValue]),
+    ),
+  );
+}
 
 type RuntimeConfiguration = {
   provider: 'cloudflare' | 'openai';
@@ -69,17 +127,6 @@ type RuntimeConfiguration = {
   usageUnit: 'neurons' | 'tokens';
   dailyFreeUnits: number | null;
   estimatedUnitsPerImage: number | null;
-};
-
-type TeamMember = {
-  id: string;
-  email: string;
-  name: string;
-  role: StudioUser['role'];
-  isActive: boolean;
-  createdAt: string;
-  permissions: string[];
-  _count: { generations: number };
 };
 
 const fallbackPresets: CategoryPreset[] = [
@@ -149,7 +196,6 @@ const sectionItems: Array<{
   { id: 'library', label: 'Asset library', icon: ImageIcon },
   { id: 'presets', label: 'Scene presets', icon: SlidersHorizontal },
   { id: 'history', label: 'Generation history', icon: History },
-  { id: 'team', label: 'Team & roles', icon: Users },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
@@ -160,6 +206,16 @@ const statusCopy: Record<GenerationStatus, string> = {
   done: 'Ready',
   failed: 'Failed',
 };
+
+function generationFailureMessage(generation: Generation): string {
+  if (
+    generation.errorCode === 'content_policy' ||
+    /3030|output has been flagged|prompt \/ input image combination/i.test(generation.error ?? '')
+  ) {
+    return 'Cloudflare could not approve this image and direction, even after one safer retry. Try a different source photo, or use Ghost mannequin or Styled flat lay for branded garments.';
+  }
+  return generation.error ?? 'The image provider could not complete this campaign.';
+}
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat('en', {
@@ -193,6 +249,8 @@ export default function StudioPage() {
   const [category, setCategory] = useState('clothing');
   const [sceneId, setSceneId] = useState('studio');
   const [variants, setVariants] = useState(4);
+  const [creativeOptions, setCreativeOptions] =
+    useState<Record<string, string>>(clothingOptionDefaults);
   const [brief, setBrief] = useState('');
   const [file, setFile] = useState<File>();
   const [inputPreview, setInputPreview] = useState<string>();
@@ -200,8 +258,6 @@ export default function StudioPage() {
   const [runtime, setRuntime] = useState<RuntimeConfiguration>();
   const [activeGeneration, setActiveGeneration] = useState<Generation>();
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
-  const [team, setTeam] = useState<TeamMember[]>([]);
-  const [loadingTeam, setLoadingTeam] = useState(false);
   const [booting, setBooting] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
@@ -214,7 +270,6 @@ export default function StudioPage() {
 
   const hasGenerationPermission = user?.permissions.includes('generation:create') ?? false;
   const canGenerate = hasGenerationPermission && Boolean(runtime?.configured);
-  const canManageTeam = user?.permissions.includes('team:manage') ?? false;
   const completedAssets = generations.reduce((total, item) => total + item.outputKeys.length, 0);
 
   useEffect(() => {
@@ -238,6 +293,9 @@ export default function StudioPage() {
         const nextRuntime = (await configurationResponse.json()) as RuntimeConfiguration;
         if (cancelled) return;
         setPresets(nextPresets);
+        setCreativeOptions(
+          defaultsForCategory(nextPresets.find((item) => item.id === 'clothing') ?? nextPresets[0]),
+        );
         setGenerations(nextGenerations);
         setRuntime(nextRuntime);
         await hydrateAssets(nextGenerations);
@@ -282,20 +340,6 @@ export default function StudioPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeGeneration?.id, activeGeneration?.status]);
-
-  useEffect(() => {
-    if (section !== 'team' || team.length > 0 || loadingTeam) return;
-    setLoadingTeam(true);
-    authFetch('/users')
-      .then(async (response) => {
-        if (!response.ok) throw new Error(await apiErrorMessage(response));
-        setTeam((await response.json()) as TeamMember[]);
-      })
-      .catch((teamError: unknown) =>
-        setError(teamError instanceof Error ? teamError.message : 'Could not load the team'),
-      )
-      .finally(() => setLoadingTeam(false));
-  }, [loadingTeam, section, team.length]);
 
   async function hydrateAssets(items: Generation[]): Promise<void> {
     const paths = items
@@ -346,7 +390,29 @@ export default function StudioPage() {
   function changeCategory(nextCategory: string) {
     const next = presets.find((item) => item.id === nextCategory);
     setCategory(nextCategory);
+    setCreativeOptions(defaultsForCategory(next));
     if (next?.scenes[0]) setSceneId(next.scenes[0].id);
+  }
+
+  function changeCreativeOption(optionId: string, value: string) {
+    setCreativeOptions((current) => ({ ...current, [optionId]: value }));
+  }
+
+  function randomizeCreativeOptions() {
+    if (!selectedCategory?.optionGroups) return;
+    setCreativeOptions((current) =>
+      Object.fromEntries(
+        selectedCategory.optionGroups!.flatMap((group) =>
+          group.options.map((definition) => {
+            if (definition.id === 'presentation') {
+              return [definition.id, current[definition.id] ?? definition.defaultValue];
+            }
+            const next = definition.choices[Math.floor(Math.random() * definition.choices.length)];
+            return [definition.id, next?.id ?? definition.defaultValue];
+          }),
+        ),
+      ),
+    );
   }
 
   async function createGeneration(event: FormEvent) {
@@ -362,6 +428,7 @@ export default function StudioPage() {
     body.append('category', category);
     body.append('sceneId', sceneId);
     body.append('variants', String(variants));
+    body.append('options', JSON.stringify(creativeOptions));
     if (brief.trim()) body.append('brief', brief.trim());
     try {
       const response = await authFetch('/generations', { method: 'POST', body });
@@ -380,6 +447,7 @@ export default function StudioPage() {
         category,
         sceneId,
         brief: brief.trim() || null,
+        creativeOptions,
         outputKeys: [],
         resultUrls: [],
         costUsd: 0,
@@ -412,19 +480,6 @@ export default function StudioPage() {
     anchor.download = `aluna-campaign-${String(index + 1).padStart(2, '0')}.png`;
     anchor.click();
     URL.revokeObjectURL(url);
-  }
-
-  async function changeRole(member: TeamMember, role: StudioUser['role']) {
-    const response = await authFetch(`/users/${member.id}/role`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role }),
-    });
-    if (!response.ok) {
-      setError(await apiErrorMessage(response));
-      return;
-    }
-    setTeam((current) => current.map((item) => (item.id === member.id ? { ...item, role } : item)));
   }
 
   async function signOut() {
@@ -522,7 +577,7 @@ export default function StudioPage() {
             </span>
             <div>
               <strong>{user?.name}</strong>
-              <small>{user?.role.toLowerCase()}</small>
+              <small>Personal account</small>
             </div>
           </div>
         </div>
@@ -594,6 +649,7 @@ export default function StudioPage() {
             assetUrls={assetUrls}
             brief={brief}
             canGenerate={canGenerate}
+            creativeOptions={creativeOptions}
             engineConfigured={Boolean(runtime?.configured)}
             hasGenerationPermission={hasGenerationPermission}
             category={category}
@@ -608,10 +664,12 @@ export default function StudioPage() {
             variants={variants}
             onBriefChange={setBrief}
             onCategoryChange={changeCategory}
+            onCreativeOptionChange={changeCreativeOption}
             onDownload={downloadResult}
             onDrop={onDrop}
             onFileChange={onFileChange}
             onSceneChange={setSceneId}
+            onRandomizeCreativeOptions={randomizeCreativeOptions}
             onSubmit={createGeneration}
             onVariantsChange={setVariants}
           />
@@ -634,15 +692,6 @@ export default function StudioPage() {
           />
         )}
         {section === 'history' && <HistorySection generations={generations} />}
-        {section === 'team' && (
-          <TeamSection
-            canManage={canManageTeam}
-            currentUserId={user?.id}
-            loading={loadingTeam}
-            members={team}
-            onRoleChange={changeRole}
-          />
-        )}
         {section === 'settings' && user && <SettingsSection runtime={runtime} user={user} />}
       </section>
     </main>
@@ -654,6 +703,7 @@ type CreateSectionProps = {
   assetUrls: Record<string, string>;
   brief: string;
   canGenerate: boolean;
+  creativeOptions: Record<string, string>;
   engineConfigured: boolean;
   hasGenerationPermission: boolean;
   category: string;
@@ -668,9 +718,11 @@ type CreateSectionProps = {
   variants: number;
   onBriefChange: (value: string) => void;
   onCategoryChange: (value: string) => void;
+  onCreativeOptionChange: (optionId: string, value: string) => void;
   onDownload: (path: string, index: number) => void;
   onDrop: (event: DragEvent<HTMLButtonElement>) => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onRandomizeCreativeOptions: () => void;
   onSceneChange: (value: string) => void;
   onSubmit: (event: FormEvent) => void;
   onVariantsChange: (value: number) => void;
@@ -708,7 +760,9 @@ function CreateSection(props: CreateSectionProps) {
         </div>
       </div>
 
-      <div className="studio-create-grid">
+      <div
+        className={`studio-create-grid ${props.activeGeneration ? '' : 'studio-create-grid--builder-only'}`}
+      >
         <form className="studio-builder" onSubmit={props.onSubmit}>
           <section className="studio-card">
             <div className="studio-card-title">
@@ -770,7 +824,6 @@ function CreateSection(props: CreateSectionProps) {
                   type="button"
                   onClick={() => props.onCategoryChange(item.id)}
                 >
-                  <span className={`studio-category-art is-${item.id}`} />
                   {item.label}
                 </button>
               ))}
@@ -785,9 +838,6 @@ function CreateSection(props: CreateSectionProps) {
                   type="button"
                   onClick={() => props.onSceneChange(scene.id)}
                 >
-                  <span className={`studio-scene-art scene-${index + 1}`}>
-                    <i />
-                  </span>
                   <span>
                     <strong>{scene.name}</strong>
                     <small>
@@ -801,6 +851,92 @@ function CreateSection(props: CreateSectionProps) {
                   <i className="studio-radio" />
                 </button>
               ))}
+            </div>
+          </section>
+
+          <section className="studio-card studio-options-card">
+            <div className="studio-card-title studio-options-title">
+              <span>03</span>
+              <div>
+                <h2>
+                  {props.category === 'clothing' ? 'Model & shot direction' : 'Shot direction'}
+                </h2>
+                <p>
+                  Shape the campaign, then let every result become its own original composition.
+                </p>
+              </div>
+              <button
+                className="studio-randomize"
+                type="button"
+                onClick={props.onRandomizeCreativeOptions}
+              >
+                <Shuffle size={14} /> Surprise me
+              </button>
+            </div>
+
+            {props.category === 'clothing' && props.creativeOptions.presentation === 'on-model' && (
+              <div className="studio-unique-note">
+                <Sparkles size={16} />
+                <span>
+                  <strong>Fresh casting is built in.</strong>
+                  Each output creates a different fictional adult model, face, pose, camera angle,
+                  and lighting nuance—even when two customers select the same setup.
+                </span>
+              </div>
+            )}
+
+            <div className="studio-option-groups">
+              {props.selectedCategory?.optionGroups
+                ?.filter(
+                  (group) =>
+                    props.creativeOptions.presentation === 'on-model' ||
+                    !group.id.startsWith('model-'),
+                )
+                .map((group) => (
+                  <div className="studio-option-group" key={group.id}>
+                    <div className="studio-option-group-head">
+                      <strong>{group.label}</strong>
+                      <span>{group.description}</span>
+                    </div>
+                    <div className="studio-option-grid">
+                      {group.options.map((definition) => {
+                        const value =
+                          props.creativeOptions[definition.id] ?? definition.defaultValue;
+                        const selected = definition.choices.find((choice) => choice.id === value);
+                        return (
+                          <label className="studio-option-field" key={definition.id}>
+                            <span>{definition.label}</span>
+                            <select
+                              aria-label={definition.label}
+                              data-option-id={definition.id}
+                              value={value}
+                              onChange={(event) =>
+                                props.onCreativeOptionChange(definition.id, event.target.value)
+                              }
+                            >
+                              {definition.choices.map((choice) => (
+                                <option key={choice.id} value={choice.id}>
+                                  {choice.label}
+                                </option>
+                              ))}
+                            </select>
+                            <small>{selected?.description ?? definition.description}</small>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </section>
+
+          <section className="studio-card">
+            <div className="studio-card-title">
+              <span>04</span>
+              <div>
+                <h2>Output plan</h2>
+                <p>Add a final note and choose how many campaign images to create.</p>
+              </div>
             </div>
 
             <label className="studio-label" htmlFor="campaign-brief">
@@ -830,11 +966,23 @@ function CreateSection(props: CreateSectionProps) {
                 <strong>{props.variants}</strong>
                 <button
                   type="button"
-                  onClick={() => props.onVariantsChange(Math.min(8, props.variants + 1))}
+                  onClick={() => props.onVariantsChange(Math.min(12, props.variants + 1))}
                 >
                   +
                 </button>
               </div>
+            </div>
+            <div className="studio-variant-presets" aria-label="Quick variant count">
+              {[2, 4, 6, 8, 12].map((count) => (
+                <button
+                  className={props.variants === count ? 'active' : ''}
+                  key={count}
+                  type="button"
+                  onClick={() => props.onVariantsChange(count)}
+                >
+                  {count} images
+                </button>
+              ))}
             </div>
           </section>
 
@@ -858,35 +1006,20 @@ function CreateSection(props: CreateSectionProps) {
           </button>
         </form>
 
-        <section className="studio-output">
-          <div className="studio-output-head">
-            <div>
-              <span>Campaign canvas</span>
-              <strong>
-                {props.selectedCategory?.label} / {props.selectedScene?.name}
-              </strong>
-            </div>
-            <span className="studio-live">
-              <i /> Live workspace
-            </span>
-          </div>
-
-          {!props.activeGeneration ? (
-            <div className="studio-canvas-empty">
-              <div className="studio-canvas-orb" />
-              {props.inputPreview ? (
-                <img src={props.inputPreview} alt="Source product preview" />
-              ) : (
-                <div className="studio-demo-bottle">
-                  <span>ALUNA</span>
-                </div>
-              )}
-              <div className="studio-canvas-caption">
-                <span>Source preview</span>
-                <p>Your finished campaign images will appear here as each variant completes.</p>
+        {props.activeGeneration && (
+          <section className="studio-output">
+            <div className="studio-output-head">
+              <div>
+                <span>Campaign results</span>
+                <strong>
+                  {props.selectedCategory?.label} / {props.selectedScene?.name}
+                </strong>
               </div>
+              <span className="studio-live">
+                <i /> Live generation
+              </span>
             </div>
-          ) : (
+
             <div className="studio-generation-output">
               <div className={`studio-job-status is-${props.activeGeneration.status}`}>
                 <span>
@@ -903,7 +1036,7 @@ function CreateSection(props: CreateSectionProps) {
                         : props.activeGeneration.status === 'done'
                           ? `${props.activeGeneration.outputKeys.length} campaign assets · $${props.activeGeneration.costUsd.toFixed(3)}`
                           : props.activeGeneration.status === 'failed'
-                            ? props.activeGeneration.error
+                            ? generationFailureMessage(props.activeGeneration)
                             : 'Your source is being prepared securely'}
                     </small>
                   </span>
@@ -949,8 +1082,8 @@ function CreateSection(props: CreateSectionProps) {
                 })}
               </div>
             </div>
-          )}
-        </section>
+          </section>
+        )}
       </div>
     </div>
   );
@@ -1086,7 +1219,6 @@ function PresetsSection({
         {presets.map((category) => (
           <section key={category.id}>
             <header>
-              <span className={`studio-category-art is-${category.id}`} />
               <div>
                 <strong>{category.label}</strong>
                 <small>3 directions</small>
@@ -1176,119 +1308,6 @@ function HistorySection({ generations }: { generations: Generation[] }) {
   );
 }
 
-function TeamSection({
-  members,
-  canManage,
-  currentUserId,
-  loading,
-  onRoleChange,
-}: {
-  members: TeamMember[];
-  canManage: boolean;
-  currentUserId?: string;
-  loading: boolean;
-  onRoleChange: (member: TeamMember, role: StudioUser['role']) => void;
-}) {
-  return (
-    <div className="studio-content">
-      <div className="studio-page-heading studio-section-heading">
-        <div>
-          <span className="studio-kicker">Access control</span>
-          <h1>Team &amp; roles.</h1>
-          <p>Give each collaborator only the workspace access they need.</p>
-        </div>
-        <button className="studio-primary-action" type="button" disabled>
-          <Plus size={17} /> Invite member
-        </button>
-      </div>
-      <div className="studio-role-cards">
-        {(['OWNER', 'ADMIN', 'CREATOR', 'VIEWER'] as const).map((role) => (
-          <article key={role}>
-            <ShieldCheck size={18} />
-            <strong>{role[0] + role.slice(1).toLowerCase()}</strong>
-            <p>
-              {role === 'OWNER'
-                ? 'Full workspace and access control'
-                : role === 'ADMIN'
-                  ? 'Manage work, team, and settings'
-                  : role === 'CREATOR'
-                    ? 'Create campaigns and manage assets'
-                    : 'Review campaigns without editing'}
-            </p>
-          </article>
-        ))}
-      </div>
-      <div className="studio-table-wrap">
-        {loading ? (
-          <EmptyState
-            icon={LoaderCircle}
-            title="Loading team"
-            copy="Checking workspace permissions…"
-          />
-        ) : (
-          <table className="studio-table">
-            <thead>
-              <tr>
-                <th>Member</th>
-                <th>Role</th>
-                <th>Status</th>
-                <th>Generations</th>
-                <th>Joined</th>
-              </tr>
-            </thead>
-            <tbody>
-              {members.map((member) => (
-                <tr key={member.id}>
-                  <td>
-                    <span className="studio-member">
-                      <i>
-                        {member.name
-                          .split(' ')
-                          .map((part) => part[0])
-                          .join('')
-                          .slice(0, 2)}
-                      </i>
-                      <span>
-                        <strong>
-                          {member.name}
-                          {member.id === currentUserId ? ' (you)' : ''}
-                        </strong>
-                        <small>{member.email}</small>
-                      </span>
-                    </span>
-                  </td>
-                  <td>
-                    <select
-                      aria-label={`Role for ${member.name}`}
-                      value={member.role}
-                      disabled={!canManage || member.id === currentUserId}
-                      onChange={(event) =>
-                        onRoleChange(member, event.target.value as StudioUser['role'])
-                      }
-                    >
-                      <option>OWNER</option>
-                      <option>ADMIN</option>
-                      <option>CREATOR</option>
-                      <option>VIEWER</option>
-                    </select>
-                  </td>
-                  <td>
-                    <span className={`studio-status ${member.isActive ? 'is-done' : 'is-failed'}`}>
-                      {member.isActive ? 'Active' : 'Suspended'}
-                    </span>
-                  </td>
-                  <td>{member._count.generations}</td>
-                  <td>{formatDate(member.createdAt)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function SettingsSection({ runtime, user }: { runtime?: RuntimeConfiguration; user: StudioUser }) {
   return (
     <div className="studio-content">
@@ -1350,19 +1369,17 @@ function SettingsSection({ runtime, user }: { runtime?: RuntimeConfiguration; us
           <header>
             <ShieldCheck size={18} />
             <div>
-              <h2>Access</h2>
-              <p>Your effective role and permissions.</p>
+              <h2>Account access</h2>
+              <p>This Studio account belongs to one person.</p>
             </div>
           </header>
           <label>
-            Role
-            <input value={user.role} readOnly />
+            Account type
+            <input value={user.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Studio user'} readOnly />
           </label>
-          <div className="studio-permissions">
-            {user.permissions.map((permission) => (
-              <span key={permission}>{permission}</span>
-            ))}
-          </div>
+          <span className="studio-config-note">
+            One active login is allowed. Signing in on a new device signs out the previous session.
+          </span>
         </section>
         <section>
           <header>

@@ -33,6 +33,17 @@ export const envValidationSchema = Joi.object({
   JWT_REFRESH_TTL_SECONDS: Joi.number().integer().min(3600).default(604800),
   DEMO_USER_EMAIL: Joi.string().email().default('demo@aluna.studio'),
   DEMO_USER_PASSWORD: Joi.string().min(12).default('AlunaDemo2026!'),
+  BOOTSTRAP_ADMIN_EMAIL: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string().email().required(),
+    otherwise: Joi.string().email().allow('').optional(),
+  }),
+  BOOTSTRAP_ADMIN_PASSWORD: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string().min(12).required(),
+    otherwise: Joi.string().min(12).allow('').optional(),
+  }),
+  BOOTSTRAP_ADMIN_NAME: Joi.string().trim().min(2).default('Aluna Administrator'),
   R2_ACCOUNT_ID: Joi.string().allow('').optional(),
   R2_ACCESS_KEY_ID: Joi.string().allow('').optional(),
   R2_SECRET_ACCESS_KEY: Joi.string().allow('').optional(),

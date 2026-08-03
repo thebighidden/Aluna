@@ -11,11 +11,11 @@ const queue = new Queue('generation', { connection: { host: '127.0.0.1', port: 6
 const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 const password = 'AlunaTest2026!';
 const emails = {
-  admin: `verify-admin-${stamp}@aluna.test`,
-  creator: `verify-creator-${stamp}@aluna.test`,
-  viewer: `verify-viewer-${stamp}@aluna.test`,
+  userOne: `verify-user-one-${stamp}@aluna.test`,
+  userTwo: `verify-user-two-${stamp}@aluna.test`,
 };
 const waitlistPhone = `+2126${String(Date.now()).slice(-8)}`;
+const visitorId = crypto.randomUUID();
 const temporaryUserIds = [];
 let generationId;
 let inputKey;
@@ -48,16 +48,19 @@ async function login(email, value = password) {
   });
 }
 
-async function createUser(token, role) {
-  const email = emails[role.toLowerCase()];
+async function createUser(token, key, name) {
+  const email = emails[key];
   const result = await json(
     '/users',
     authorized(token, {
       method: 'POST',
-      body: JSON.stringify({ name: `Verify ${role}`, email, password, role }),
+      body: JSON.stringify({ name, email, password }),
     }),
   );
-  check(result.response.status === 201, `${role.toLowerCase()} account can be created by owner`);
+  check(
+    result.response.status === 201 && result.body.role === 'USER',
+    'Super Admin creates a normal Studio user',
+  );
   temporaryUserIds.push(result.body.id);
   return result.body;
 }
@@ -89,23 +92,28 @@ try {
     'invalid credentials are rejected',
   );
 
-  const ownerLogin = await login('demo@aluna.studio', 'AlunaDemo2026!');
+  const firstAdminLogin = await login('demo@aluna.studio', 'AlunaDemo2026!');
   check(
-    ownerLogin.response.status === 200 && ownerLogin.body.user.role === 'OWNER',
-    'demo owner can authenticate',
+    firstAdminLogin.response.status === 200 && firstAdminLogin.body.user.role === 'SUPER_ADMIN',
+    'the single Super Admin can authenticate',
   );
-  const ownerToken = ownerLogin.body.accessToken;
+  const secondAdminLogin = await login('demo@aluna.studio', 'AlunaDemo2026!');
+  check(secondAdminLogin.response.status === 200, 'a new login can replace the active session');
+  let adminToken = secondAdminLogin.body.accessToken;
 
-  result = await json('/auth/me', authorized(ownerToken));
+  result = await json('/auth/me', authorized(firstAdminLogin.body.accessToken));
+  check(result.response.status === 401, 'a second login immediately invalidates the first session');
+
+  result = await json('/auth/me', authorized(adminToken));
   check(
     result.response.status === 200 && result.body.permissions.includes('analytics:read'),
-    'owner identity includes analytics permission',
+    'Super Admin identity includes analytics permission',
   );
 
   result = await json('/generations');
   check(result.response.status === 401, 'protected generation ledger rejects anonymous access');
 
-  result = await json('/generations/presets', authorized(ownerToken));
+  result = await json('/generations/presets', authorized(adminToken));
   check(
     result.response.status === 200 && result.body.length === 6,
     'all six product categories are available',
@@ -114,7 +122,15 @@ try {
     result.body.every((category) => category.scenes.length === 3),
     'every category exposes three thoughtful scenes',
   );
-  result = await json('/generations/configuration', authorized(ownerToken));
+  const clothingPreset = result.body.find((category) => category.id === 'clothing');
+  check(
+    clothingPreset.optionGroups.some((group) => group.id === 'model-casting') &&
+      clothingPreset.optionGroups
+        .flatMap((group) => group.options)
+        .some((option) => option.id === 'modelGender' && option.choices.length >= 4),
+    'clothing exposes detailed model casting controls',
+  );
+  result = await json('/generations/configuration', authorized(adminToken));
   runtimeConfig = result.body;
   check(
     result.response.status === 200 && ['cloudflare', 'openai'].includes(runtimeConfig.provider),
@@ -125,14 +141,31 @@ try {
     'generation provider readiness and model are reported',
   );
 
-  result = await json('/admin/overview?days=30', authorized(ownerToken));
+  result = await json('/admin/overview?days=30', authorized(adminToken));
   check(
     result.response.status === 200 && result.body.summary && result.body.queue,
     'admin overview returns live analytics and queue health',
   );
 
-  result = await json('/admin/overview?days=13', authorized(ownerToken));
+  result = await json('/admin/overview?days=13', authorized(adminToken));
   check(result.response.status === 400, 'analytics range validation rejects unsupported periods');
+
+  result = await json('/analytics/visits', {
+    method: 'POST',
+    body: JSON.stringify({ path: '/system-test', visitorId, referrer: 'https://example.test/' }),
+  });
+  check(
+    result.response.status === 202 && result.body.recorded,
+    'public site analytics records a privacy-safe page view',
+  );
+  result = await json('/analytics/visits', {
+    method: 'POST',
+    body: JSON.stringify({ path: '/system-test', visitorId }),
+  });
+  check(
+    result.response.status === 202 && !result.body.recorded,
+    'rapid duplicate page views are de-duplicated',
+  );
 
   result = await json('/waitlist', {
     method: 'POST',
@@ -150,138 +183,159 @@ try {
   result = await json('/waitlist', { method: 'POST', body: JSON.stringify({ phone: 'invalid' }) });
   check(result.response.status === 400, 'waitlist phone validation works');
 
-  const admin = await createUser(ownerToken, 'ADMIN');
-  const creator = await createUser(ownerToken, 'CREATOR');
-  const viewer = await createUser(ownerToken, 'VIEWER');
+  const userOne = await createUser(adminToken, 'userOne', 'Verify User One');
+  const userTwo = await createUser(adminToken, 'userTwo', 'Verify User Two');
+
+  result = await json(
+    `/users/${userOne.id}`,
+    authorized(adminToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'Verify User One Edited' }),
+    }),
+  );
+  check(
+    result.response.status === 200 && result.body.name === 'Verify User One Edited',
+    'Super Admin can edit a user account',
+  );
+  result = await json('/users', authorized(adminToken));
+  check(
+    result.response.status === 200 &&
+      result.body.some(
+        (user) =>
+          user.id === userOne.id && 'lastLoginAt' in user && typeof user.loginCount === 'number',
+      ),
+    'user list includes login activity and management metadata',
+  );
 
   result = await json(
     '/users',
-    authorized(ownerToken, {
+    authorized(adminToken, {
       method: 'POST',
-      body: JSON.stringify({ name: 'Duplicate', email: emails.viewer, password, role: 'VIEWER' }),
+      body: JSON.stringify({ name: 'Duplicate', email: emails.userTwo, password }),
     }),
   );
   check(result.response.status === 409, 'duplicate user email is rejected');
   result = await json(
     '/users',
-    authorized(ownerToken, {
+    authorized(adminToken, {
       method: 'POST',
       body: JSON.stringify({
         name: 'Weak',
         email: `weak-${stamp}@aluna.test`,
         password: 'short',
-        role: 'VIEWER',
       }),
     }),
   );
   check(result.response.status === 400, 'weak user password is rejected');
+  result = await json(
+    '/users',
+    authorized(adminToken, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Role injection',
+        email: `role-${stamp}@aluna.test`,
+        password,
+        role: 'SUPER_ADMIN',
+      }),
+    }),
+  );
+  check(result.response.status === 400, 'a second Super Admin cannot be created through the API');
 
-  const [adminLogin, creatorLogin, viewerLogin] = await Promise.all([
-    login(emails.admin),
-    login(emails.creator),
-    login(emails.viewer),
+  const [firstUserOneLogin, userTwoLogin] = await Promise.all([
+    login(emails.userOne),
+    login(emails.userTwo),
   ]);
-  check(adminLogin.response.status === 200, 'admin can authenticate');
-  check(creatorLogin.response.status === 200, 'creator can authenticate');
-  check(viewerLogin.response.status === 200, 'viewer can authenticate');
+  check(
+    firstUserOneLogin.response.status === 200 && firstUserOneLogin.body.user.role === 'USER',
+    'normal user can authenticate with full Studio access',
+  );
+  check(userTwoLogin.response.status === 200, 'a second independent user can authenticate');
 
-  result = await json('/admin/overview?days=7', authorized(viewerLogin.body.accessToken));
-  check(result.response.status === 403, 'viewer cannot access admin analytics');
-  result = await json('/admin/overview?days=7', authorized(creatorLogin.body.accessToken));
-  check(result.response.status === 403, 'creator cannot access admin analytics');
-  result = await json('/admin/overview?days=7', authorized(adminLogin.body.accessToken));
-  check(result.response.status === 200, 'admin can access analytics');
+  const secondUserOneLogin = await login(emails.userOne);
+  result = await json('/auth/me', authorized(firstUserOneLogin.body.accessToken));
+  check(result.response.status === 401, 'a user account permits only one active login');
+  let userOneToken = secondUserOneLogin.body.accessToken;
+
+  result = await json('/admin/overview?days=7', authorized(userOneToken));
+  check(result.response.status === 403, 'normal user cannot access Super Admin analytics');
+  result = await json('/admin/overview?days=7', authorized(adminToken));
+  check(result.response.status === 200, 'Super Admin can access analytics');
 
   result = await json(
     '/users',
-    authorized(creatorLogin.body.accessToken, {
+    authorized(userOneToken, {
       method: 'POST',
       body: JSON.stringify({
         name: 'Forbidden',
         email: `forbidden-${stamp}@aluna.test`,
         password,
-        role: 'VIEWER',
       }),
     }),
   );
-  check(result.response.status === 403, 'creator cannot create users');
+  check(result.response.status === 403, 'normal user cannot create or manage accounts');
 
   result = await fetch(
     `${api}/generations`,
-    authorized(viewerLogin.body.accessToken, { method: 'POST', body: new FormData() }),
+    authorized(userOneToken, { method: 'POST', body: new FormData() }),
   );
-  check(result.status === 403, 'viewer cannot enqueue image generation');
-  result = await fetch(
-    `${api}/generations`,
-    authorized(creatorLogin.body.accessToken, { method: 'POST', body: new FormData() }),
-  );
-  check(result.status === 400, 'creator request requires an image upload');
+  check(result.status === 400, 'normal user can generate and must provide an image upload');
 
-  result = await json(
-    `/generations/${crypto.randomUUID()}`,
-    authorized(creatorLogin.body.accessToken),
-  );
+  result = await json(`/generations/${crypto.randomUUID()}`, authorized(userOneToken));
   check(result.response.status === 404, 'unknown generation is not exposed');
 
   const refreshed = await json('/auth/refresh', {
     method: 'POST',
-    body: JSON.stringify({ refreshToken: ownerLogin.body.refreshToken }),
+    body: JSON.stringify({ refreshToken: secondAdminLogin.body.refreshToken }),
   });
   check(refreshed.response.status === 200, 'refresh token rotates successfully');
+  adminToken = refreshed.body.accessToken;
   result = await json('/auth/refresh', {
     method: 'POST',
-    body: JSON.stringify({ refreshToken: ownerLogin.body.refreshToken }),
+    body: JSON.stringify({ refreshToken: secondAdminLogin.body.refreshToken }),
   });
   check(result.response.status === 401, 'rotated refresh token cannot be reused');
-  result = await json('/auth/logout', {
-    method: 'POST',
-    body: JSON.stringify({ refreshToken: refreshed.body.refreshToken }),
-  });
-  check(result.response.status === 204, 'logout revokes the active session');
-  result = await json('/auth/refresh', {
-    method: 'POST',
-    body: JSON.stringify({ refreshToken: refreshed.body.refreshToken }),
-  });
-  check(result.response.status === 401, 'logged-out refresh token is rejected');
 
-  const activeOwners = await prisma.user.count({ where: { role: 'OWNER', isActive: true } });
-  if (activeOwners === 1) {
-    result = await json(
-      `/users/${ownerLogin.body.user.id}/status`,
-      authorized(ownerToken, { method: 'PATCH', body: JSON.stringify({ isActive: false }) }),
-    );
-    check(result.response.status === 400, 'last active owner cannot be suspended');
-  }
+  const superAdmins = await prisma.user.count({ where: { role: 'SUPER_ADMIN' } });
+  check(superAdmins === 1, 'the database contains exactly one Super Admin');
+  result = await json(
+    `/users/${secondAdminLogin.body.user.id}/status`,
+    authorized(adminToken, { method: 'PATCH', body: JSON.stringify({ isActive: false }) }),
+  );
+  check(result.response.status === 403, 'the Super Admin account cannot be suspended');
+  result = await json(
+    `/users/${secondAdminLogin.body.user.id}`,
+    authorized(adminToken, { method: 'DELETE' }),
+  );
+  check(result.response.status === 403, 'the Super Admin account cannot be deleted');
 
   result = await json(
-    `/users/${viewer.id}/role`,
-    authorized(adminLogin.body.accessToken, {
+    `/users/${userTwo.id}/role`,
+    authorized(adminToken, {
       method: 'PATCH',
-      body: JSON.stringify({ role: 'CREATOR' }),
+      body: JSON.stringify({ role: 'SUPER_ADMIN' }),
     }),
   );
-  check(
-    result.response.status === 200 && result.body.role === 'CREATOR',
-    'admin can change a user role',
-  );
+  check(result.response.status === 404, 'role-changing endpoint does not exist');
   result = await json(
-    `/users/${viewer.id}/status`,
-    authorized(adminLogin.body.accessToken, {
+    `/users/${userTwo.id}/status`,
+    authorized(adminToken, {
       method: 'PATCH',
       body: JSON.stringify({ isActive: false }),
     }),
   );
-  check(result.response.status === 200 && !result.body.isActive, 'admin can suspend a user');
-  result = await login(emails.viewer);
+  check(result.response.status === 200 && !result.body.isActive, 'Super Admin can suspend a user');
+  result = await login(emails.userTwo);
   check(result.response.status === 401, 'suspended user cannot authenticate');
   result = await json(
-    `/users/${viewer.id}/status`,
-    authorized(adminLogin.body.accessToken, {
+    `/users/${userTwo.id}/status`,
+    authorized(adminToken, {
       method: 'PATCH',
       body: JSON.stringify({ isActive: true }),
     }),
   );
-  check(result.response.status === 200 && result.body.isActive, 'admin can restore a user');
+  check(result.response.status === 200 && result.body.isActive, 'Super Admin can restore a user');
+  const restoredUserTwoLogin = await login(emails.userTwo);
+  check(restoredUserTwoLogin.response.status === 200, 'restored user can authenticate again');
 
   // Deliberately malformed image bytes exercise the complete queue failure path without
   // consuming provider credits during routine verification.
@@ -291,17 +345,38 @@ try {
   form.append('category', 'clothing');
   form.append('sceneId', 'studio');
   form.append('variants', '1');
+  form.append(
+    'options',
+    JSON.stringify({
+      presentation: 'on-model',
+      modelGender: 'female',
+      modelAge: '35-49',
+      modelHeritage: 'mena',
+      bodyBuild: 'curvy',
+      hairDirection: 'curls',
+      expression: 'confident',
+      castingDiversity: 'unique-each',
+      pose: 'walking',
+      framing: 'full-body',
+      campaignMood: 'bold-editorial',
+      composition: 'vary',
+      camera: 'natural-50',
+      lighting: 'soft-studio',
+      palette: 'warm-neutral',
+      variationStrength: 'adventurous',
+    }),
+  );
   const queued = await fetch(
     `${api}/generations`,
-    authorized(creatorLogin.body.accessToken, { method: 'POST', body: form }),
+    authorized(userOneToken, { method: 'POST', body: form }),
   );
   const queuedBody = await queued.json();
   check(
     queued.status === 201 && queuedBody.status === 'queued',
-    'creator can enqueue a valid multipart generation',
+    'normal user can enqueue a valid multipart generation',
   );
   generationId = queuedBody.id;
-  const failedRun = await waitForFinalGeneration(creatorLogin.body.accessToken);
+  const failedRun = await waitForFinalGeneration(userOneToken);
   inputKey = (
     await prisma.generation.findUnique({ where: { id: generationId }, select: { inputKey: true } })
   )?.inputKey;
@@ -318,12 +393,75 @@ try {
     failedRun.model === runtimeConfig.model && failedRun.requestedVariants === 1,
     'selected provider model and requested consumption are persisted',
   );
+  check(
+    failedRun.creativeOptions.modelGender === 'female' &&
+      failedRun.creativeOptions.castingDiversity === 'unique-each',
+    'creative casting controls are validated and persisted with the run',
+  );
 
-  result = await json('/admin/overview?days=7', authorized(adminLogin.body.accessToken));
+  result = await json(
+    `/generations/${generationId}`,
+    authorized(restoredUserTwoLogin.body.accessToken),
+  );
+  check(result.response.status === 404, 'one user cannot inspect another user’s generation');
+
+  result = await json('/admin/overview?days=7', authorized(adminToken));
   check(
     result.response.status === 200 &&
       result.body.recentGenerations.some((run) => run.id === generationId),
-    'failed request appears in admin analytics',
+    'every user request appears in Super Admin analytics',
+  );
+  check(
+    result.body.userConsumption.some(
+      (user) => user.id === userOne.id && Array.isArray(user.providerUsage),
+    ),
+    'Super Admin receives per-user images, tokens, provider units, spend, and failures',
+  );
+  check(
+    result.body.summary.siteVisits >= 1 &&
+      result.body.topPages.some((page) => page.path === '/system-test'),
+    'admin analytics includes real visits, unique visitors, and popular pages',
+  );
+  check(
+    'remainingCreditValueUsd' in result.body.configuration &&
+      'estimatedImagesRemaining' in result.body.configuration,
+    'admin analytics reports remaining provider units, credit value, and image capacity',
+  );
+
+  result = await json(`/admin/generations?take=20&search=${generationId}`, authorized(adminToken));
+  check(
+    result.response.status === 200 &&
+      result.body.total >= 1 &&
+      result.body.items[0].id === generationId &&
+      result.body.items[0].inputUrl &&
+      Array.isArray(result.body.items[0].resultUrls),
+    'complete generation audit exposes source and result references',
+  );
+  const sourcePreview = await fetch(
+    `${api}/generations/${generationId}/input`,
+    authorized(adminToken),
+  );
+  check(sourcePreview.status === 200, 'Super Admin can securely inspect a user source image');
+
+  result = await json('/auth/logout', {
+    method: 'POST',
+    body: JSON.stringify({ refreshToken: restoredUserTwoLogin.body.refreshToken }),
+  });
+  check(result.response.status === 204, 'logout revokes the active session');
+  result = await json('/auth/refresh', {
+    method: 'POST',
+    body: JSON.stringify({ refreshToken: restoredUserTwoLogin.body.refreshToken }),
+  });
+  check(result.response.status === 401, 'logged-out refresh token is rejected');
+
+  result = await json(`/users/${userOne.id}`, authorized(adminToken, { method: 'DELETE' }));
+  check(result.response.status === 204, 'Super Admin can delete a user account');
+  result = await json(`/admin/generations?take=20&search=${generationId}`, authorized(adminToken));
+  check(
+    result.response.status === 200 &&
+      result.body.items[0].user.name === 'Verify User One Edited' &&
+      result.body.items[0].user.email === emails.userOne,
+    'generation ownership remains auditable after its user account is deleted',
   );
 
   console.log(`\nSystem verification complete: ${passed} checks passed.`);
@@ -338,6 +476,7 @@ try {
     await prisma.user.deleteMany({ where: { id: { in: temporaryUserIds } } });
   }
   await prisma.waitlistSubscriber.deleteMany({ where: { phone: waitlistPhone } });
+  await prisma.siteVisit.deleteMany({ where: { visitorId } });
   if (generationId) await prisma.generation.deleteMany({ where: { id: generationId } });
   if (inputKey && inputKey.includes(generationId)) {
     const outputRoot = resolve('output');

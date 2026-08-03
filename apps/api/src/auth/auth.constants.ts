@@ -10,8 +10,7 @@ export enum Permission {
   AssetManage = 'asset:manage',
   PresetRead = 'preset:read',
   PresetManage = 'preset:manage',
-  TeamRead = 'team:read',
-  TeamManage = 'team:manage',
+  UsersManage = 'users:manage',
   SettingsRead = 'settings:read',
   SettingsManage = 'settings:manage',
   AnalyticsRead = 'analytics:read',
@@ -20,24 +19,16 @@ export enum Permission {
 const allPermissions = Object.values(Permission);
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
-  [Role.OWNER]: allPermissions,
-  [Role.ADMIN]: allPermissions,
-  [Role.CREATOR]: [
+  [Role.SUPER_ADMIN]: allPermissions,
+  [Role.USER]: [
     Permission.GenerationCreate,
     Permission.GenerationReadOwn,
     Permission.GenerationDeleteOwn,
     Permission.AssetRead,
     Permission.AssetManage,
     Permission.PresetRead,
-    Permission.TeamRead,
     Permission.SettingsRead,
-  ],
-  [Role.VIEWER]: [
-    Permission.GenerationReadOwn,
-    Permission.AssetRead,
-    Permission.PresetRead,
-    Permission.TeamRead,
-    Permission.SettingsRead,
+    Permission.SettingsManage,
   ],
 };
 

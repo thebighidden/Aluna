@@ -50,7 +50,7 @@ pnpm generate --image ./test.jpg --category clothing --scene studio --variants 4
 
 Each variant is a separate provider image-edit request. With local storage, output is written under
 `apps/api/output/<timestamp>/`; cumulative estimated cost and duration are updated in the
-`generation_runs` table after each completed variant. The CLI accepts 1–8 variants.
+`generation_runs` table after each completed variant. The CLI accepts 1–12 variants.
 
 List every category and scene ID:
 
@@ -101,23 +101,33 @@ The Studio is a real API client, not a simulated interface:
 
 1. Sign in and upload a PNG, JPG, or WEBP source image up to 15 MB.
 2. Select one of six categories and its three scene presets.
-3. Optionally add a short campaign brief and choose 1–8 variants.
-4. The API stores the source, creates a Postgres record, and queues the BullMQ job in Redis.
-5. The Studio polls protected job status and reveals each generated variant as it completes.
-6. Results remain available in Campaigns, Asset library, and Generation history.
+3. Choose detailed creative controls. Clothing supports on-model, ghost-mannequin, and flat-lay
+   presentation plus adult model gender, age, appearance, body build, hair, expression, pose, and
+   framing. Every category supports mood, composition, camera, lighting, palette, and variation
+   strength.
+4. Optionally add a short campaign brief and choose 1–12 variants.
+5. The API stores the source, creates a Postgres record, and queues the BullMQ job in Redis.
+6. The Studio polls protected job status and reveals each generated variant as it completes.
+7. Results remain available in Campaigns, Asset library, and Generation history.
 
-The sidebar also includes scene presets, team roles, permission-aware controls, and workspace
-settings.
+The sidebar also includes scene presets, generation history, and personal account settings. Every
+customer account is an independent, single-person Studio workspace.
 
 ## Admin operations dashboard
 
-Owners and admins can use the responsive dashboard to manage the workspace from desktop or mobile.
-Its data comes from Postgres, Redis, and the configured generation runtime; none of the metrics are
-hardcoded. It includes:
+The single Super Admin can use the responsive dashboard to manage all customer accounts from
+desktop or mobile. Its data comes from Postgres, Redis, and the configured generation runtime;
+none of the metrics are hardcoded. It includes:
 
 - Request, image, provider-unit, cost, success-rate, and duration summaries for 7, 30, or 90 days.
-- Daily volume, product-category allocation, per-user consumption, and a generation audit ledger.
-- User creation, role assignment, account suspension/reactivation, and last-owner protection.
+- Daily generation volume, first-party site visits, unique visitors, popular routes, device mix,
+  product-category allocation, and per-user consumption.
+- A complete, searchable generation ledger with secure source/output previews, creative settings,
+  provider telemetry, duration, cost, and failure details.
+- User creation, editing, password reset, account suspension/reactivation, safe deletion, login
+  activity, and a protected Super Admin identity.
+- Per-user requests, completed images, provider units or tokens, estimated spend, failures, and
+  last activity.
 - BullMQ worker/queue health, storage mode, model defaults, and classified provider failures.
 - Cloudflare neuron usage, estimated remaining daily demo images, provider mix, and internal
   list-price estimates.
@@ -126,17 +136,16 @@ hardcoded. It includes:
 
 The optional admin key stays on the API server and is never sent to the browser.
 
-## Authentication, roles, and permissions
+## Authentication and account access
 
 Authentication uses short-lived JWT access tokens plus rotated, hashed refresh sessions stored in
-Postgres. Nest guards protect generation, asset, team, preset, and settings endpoints.
+Postgres. A new login revokes the previous session, so each account can be active on only one
+device/browser at a time. Nest guards isolate every customer's generations and assets.
 
-| Role    | Access                                                       |
-| ------- | ------------------------------------------------------------ |
-| Owner   | Full workspace, generation, team, and settings control       |
-| Admin   | Full operational and access-management control               |
-| Creator | Create campaigns, manage own assets, read team and settings  |
-| Viewer  | Read assigned campaigns, assets, presets, team, and settings |
+| Account type | Access                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------- |
+| Super Admin  | The only administrative account; manages users and sees all usage, cost, generations, and system health |
+| User         | Full control of their own Studio campaigns, variants, history, assets, presets, and settings            |
 
 Auth endpoints:
 
@@ -147,19 +156,24 @@ POST /auth/logout
 GET  /auth/me
 ```
 
-Team endpoints require `team:read` or `team:manage`:
+Only the Super Admin can use the customer-management endpoints:
 
 ```text
 GET   /users
 POST  /users
-PATCH /users/:id/role
+PATCH /users/:id
 PATCH /users/:id/status
+DELETE /users/:id
 ```
 
 The live operations endpoint requires `analytics:read`:
 
 ```text
 GET /admin/overview?days=7|30|90
+GET /admin/generations?take=100&skip=0&status=DONE&userId=...&search=...
+
+# Public, privacy-safe page-view collector
+POST /analytics/visits
 ```
 
 ## Generation API
@@ -172,12 +186,13 @@ GET  /generations/configuration
 GET  /generations
 POST /generations
 GET  /generations/:id
+GET  /generations/:id/input
 GET  /generations/:id/results/:index
 GET  /generations/:id/events
 ```
 
-`POST /generations` accepts multipart fields `image`, `category`, `sceneId`, `variants`, and optional
-`brief`. Queue events progress through:
+`POST /generations` accepts multipart fields `image`, `category`, `sceneId`, `variants`, optional
+`brief`, and optional JSON `options`. Queue events progress through:
 
 ```text
 queued → analyzing → generating → variant-complete → done
@@ -201,11 +216,12 @@ R2_BUCKET=
 
 ## Data model
 
-Prisma stores `User`, `RefreshSession`, `Generation`, and `WaitlistSubscriber` records. Generation
-records include owner, provider, status, category, scene, campaign brief, source/output keys,
-requested/completed variants, model settings, provider-specific usage units, detailed OpenAI token
-usage when applicable, estimated cost, duration, classified errors, and timestamps. Checked-in SQL
-migrations create the complete local schema.
+Prisma stores `User`, `RefreshSession`, `Generation`, `SiteVisit`, and `WaitlistSubscriber` records.
+Generation records include immutable owner snapshots, provider, status, category, scene, campaign
+brief, source/output keys, requested/completed variants, model settings, provider-specific usage
+units, detailed OpenAI token usage when applicable, estimated cost, duration, classified errors, and
+timestamps. Site visits use an anonymous browser identifier and never store raw IP addresses.
+Checked-in SQL migrations create the complete local schema.
 
 ## Connect from a phone on the same network
 
@@ -238,10 +254,37 @@ pnpm format:check
 pnpm --filter @product-photo/api test:system
 ```
 
-The reusable system suite exercises authentication and refresh rotation, role boundaries, last-owner
-protection, user lifecycle controls, validation, waitlist idempotency, all 18 scene presets, queue
-processing, provider-error classification, persisted provider configuration, and admin analytics.
+The reusable system suite exercises authentication and refresh rotation, role boundaries, Super
+Admin protection, user edit/suspend/reactivate/delete controls, deleted-user audit preservation,
+traffic analytics, secure source previews, validation, waitlist idempotency, all 18 scene presets,
+queue processing, provider-error classification, persisted provider configuration, and admin
+analytics.
 Routine verification deliberately uses malformed image bytes so it never spends external provider
 credits. It creates uniquely named fixtures and removes them after the run.
 
 Prompt editing and experiment logging are documented in [PROMPTING.md](./PROMPTING.md).
+
+## Hosted deployment
+
+The checked-in deployment configuration uses a low-cost demo topology:
+
+- Vercel deploys `apps/web` as the Next.js project.
+- Render deploys the NestJS API and BullMQ processor in one web service, plus managed Postgres and
+  a Redis-compatible Key Value instance from `render.yaml`.
+- Cloudflare R2 stores source and generated product images.
+- Cloudflare DNS routes `aluna.thebighidden.com` to Vercel and
+  `api.aluna.thebighidden.com` to Render.
+
+Create the Render Blueprint from this repository and provide every `sync: false` secret when
+prompted. The free Render plans are suitable only for initial acceptance testing: the web service
+can sleep, Key Value has no persistence, and the free Postgres database expires. Upgrade the API to
+Starter, Postgres to Basic, and Key Value to a persistent paid plan before production use.
+
+Create a Vercel project from the same repository with `apps/web` as its Root Directory. Set
+`ALUNA_API_ORIGIN=https://api.aluna.thebighidden.com` for Production, then assign
+`aluna.thebighidden.com` to the project. `NEXT_PUBLIC_API_URL` can remain unset so browser requests
+use the same-origin `/api` rewrite.
+
+The production API requires a bootstrap Super Admin email and a password of at least 12 characters.
+After the first successful startup, that account is stored in Postgres; the bootstrap variables do
+not overwrite it on later deployments.

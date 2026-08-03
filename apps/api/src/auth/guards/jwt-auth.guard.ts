@@ -35,9 +35,21 @@ export class JwtAuthGuard implements CanActivate {
         secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
       });
       if (payload.type !== 'access') throw new Error('Unexpected token type');
+      if (!payload.sid) throw new Error('Access token has no active session');
 
-      const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
+      const [user, session] = await Promise.all([
+        this.prisma.user.findUnique({ where: { id: payload.sub } }),
+        this.prisma.refreshSession.findUnique({ where: { id: payload.sid } }),
+      ]);
       if (!user?.isActive) throw new Error('User is inactive');
+      if (
+        !session ||
+        session.userId !== user.id ||
+        session.revokedAt ||
+        session.expiresAt.getTime() <= Date.now()
+      ) {
+        throw new Error('Session is inactive');
+      }
       request.user = {
         id: user.id,
         email: user.email,

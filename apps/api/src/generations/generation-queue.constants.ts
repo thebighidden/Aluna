@@ -8,4 +8,5 @@ export interface GenerationJobData {
   sceneId: string;
   variants: number;
   brief?: string;
+  options: Record<string, string>;
 }

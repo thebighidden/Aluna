@@ -1,11 +1,12 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GenerationStatus } from '@prisma/client';
+import { GenerationStatus, Prisma } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { GenerationService, GenerationProvider } from '../generation/generation.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { GENERATION_QUEUE, GenerationJobData } from '../generations/generation-queue.constants';
+import { AdminGenerationQueryDto } from './dto/admin-generation-query.dto';
 
 type DailyMetric = {
   date: string;
@@ -32,7 +33,7 @@ export class AdminService {
     from.setUTCHours(0, 0, 0, 0);
     from.setUTCDate(from.getUTCDate() - (days - 1));
 
-    const [runs, users, waitlistCount, queue, platformUsage] = await Promise.all([
+    const [runs, users, visits, waitlistCount, queue, platformUsage] = await Promise.all([
       this.prisma.generation.findMany({
         where: { createdAt: { gte: from } },
         orderBy: { createdAt: 'desc' },
@@ -40,7 +41,27 @@ export class AdminService {
       }),
       this.prisma.user.findMany({
         orderBy: { createdAt: 'asc' },
-        select: { id: true, name: true, email: true, role: true, isActive: true },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          isActive: true,
+          lastLoginAt: true,
+          loginCount: true,
+          createdAt: true,
+        },
+      }),
+      this.prisma.siteVisit.findMany({
+        where: { createdAt: { gte: from } },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          path: true,
+          visitorId: true,
+          country: true,
+          device: true,
+          createdAt: true,
+        },
       }),
       this.prisma.waitlistSubscriber.count(),
       this.queueHealth(),
@@ -80,6 +101,8 @@ export class AdminService {
         failed: failed.length,
         totalUsers: users.length,
         activeUsers: users.filter((user) => user.isActive).length,
+        siteVisits: visits.length,
+        uniqueVisitors: new Set(visits.map((visit) => visit.visitorId)).size,
         waitlistSubscribers: waitlistCount,
         totalTokens: runs.reduce((sum, run) => sum + run.totalTokens, 0),
         providerUsageUnits: activeProviderRuns.reduce(
@@ -89,6 +112,9 @@ export class AdminService {
         providerUsageUnit: runtime.usageUnit,
       },
       trend: this.trend(days, from, runs),
+      trafficTrend: this.trafficTrend(days, from, visits),
+      topPages: this.topPages(visits),
+      deviceBreakdown: this.deviceBreakdown(visits),
       categoryBreakdown: this.categoryBreakdown(runs),
       statusBreakdown: Object.values(GenerationStatus).map((status) => ({
         status: status.toLowerCase(),
@@ -97,41 +123,30 @@ export class AdminService {
       providerBreakdown: this.providerBreakdown(runs),
       userConsumption: users.map((user) => {
         const userRuns = runs.filter((run) => run.userId === user.id);
+        const providerUsage = [...new Set(userRuns.map((run) => run.provider))].map((provider) => {
+          const providerRuns = userRuns.filter((run) => run.provider === provider);
+          return {
+            provider,
+            units: this.units(
+              providerRuns.reduce((sum, run) => sum + Number(run.providerUsageUnits), 0),
+            ),
+            unit:
+              providerRuns.find((run) => Number(run.providerUsageUnits) > 0)?.providerUsageUnit ??
+              (provider === 'cloudflare' ? 'neurons' : 'tokens'),
+          };
+        });
         return {
           ...user,
           requests: userRuns.length,
           images: userRuns.reduce((sum, run) => sum + run.outputKeys.length, 0),
           spendUsd: this.money(userRuns.reduce((sum, run) => sum + Number(run.costUsd), 0)),
           totalTokens: userRuns.reduce((sum, run) => sum + run.totalTokens, 0),
+          providerUsage,
           failures: userRuns.filter((run) => run.status === GenerationStatus.FAILED).length,
           lastActivity: userRuns[0]?.createdAt ?? null,
         };
       }),
-      recentGenerations: runs.slice(0, 25).map((run) => ({
-        id: run.id,
-        user: run.user,
-        status: run.status.toLowerCase(),
-        provider: run.provider,
-        model: run.model,
-        quality: run.quality,
-        imageSize: run.imageSize,
-        category: run.category,
-        sceneId: run.sceneId,
-        requestedVariants: run.requestedVariants,
-        completedVariants: run.outputKeys.length,
-        inputTokens: run.inputTokens,
-        inputTextTokens: run.inputTextTokens,
-        inputImageTokens: run.inputImageTokens,
-        outputTokens: run.outputTokens,
-        totalTokens: run.totalTokens,
-        providerUsageUnits: Number(run.providerUsageUnits),
-        providerUsageUnit: run.providerUsageUnit,
-        costUsd: Number(run.costUsd),
-        durationMs: run.durationMs,
-        error: run.error,
-        errorCode: run.errorCode,
-        createdAt: run.createdAt,
-      })),
+      recentGenerations: runs.slice(0, 25).map((run) => this.serializeRun(run)),
       queue,
       configuration: {
         provider: runtime.providerLabel,
@@ -146,6 +161,12 @@ export class AdminService {
         todayProviderUnits: this.units(todayProviderUnits),
         remainingFreeUnits: remainingFreeUnits === null ? null : this.units(remainingFreeUnits),
         estimatedImagesRemaining,
+        dailyCreditValueUsd:
+          runtime.dailyFreeUnits === null
+            ? null
+            : this.money((runtime.dailyFreeUnits / 1_000) * 0.011),
+        remainingCreditValueUsd:
+          remainingFreeUnits === null ? null : this.money((remainingFreeUnits / 1_000) * 0.011),
         storage: this.hasR2Configuration() ? 'Cloudflare R2' : 'Local disk',
         costMode: platformUsage.connected
           ? 'OpenAI organization costs'
@@ -156,6 +177,43 @@ export class AdminService {
         latestProviderErrorCode: latestProviderFailure?.errorCode ?? null,
       },
       platformUsage,
+    };
+  }
+
+  async generations(query: AdminGenerationQueryDto) {
+    const search = query.search?.trim();
+    const where: Prisma.GenerationWhereInput = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.userId ? { userId: query.userId } : {}),
+      ...(search
+        ? {
+            OR: [
+              { id: { contains: search, mode: 'insensitive' } },
+              { category: { contains: search, mode: 'insensitive' } },
+              { sceneId: { contains: search, mode: 'insensitive' } },
+              { ownerName: { contains: search, mode: 'insensitive' } },
+              { ownerEmail: { contains: search, mode: 'insensitive' } },
+              { user: { name: { contains: search, mode: 'insensitive' } } },
+              { user: { email: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+    const [total, runs] = await Promise.all([
+      this.prisma.generation.count({ where }),
+      this.prisma.generation.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+        include: { user: { select: { id: true, name: true, email: true, role: true } } },
+      }),
+    ]);
+    return {
+      total,
+      skip: query.skip,
+      take: query.take,
+      items: runs.map((run) => this.serializeRun(run)),
     };
   }
 
@@ -196,6 +254,89 @@ export class AdminService {
         spendUsd: this.money(categoryRuns.reduce((sum, run) => sum + Number(run.costUsd), 0)),
       };
     });
+  }
+
+  private trafficTrend(
+    days: number,
+    from: Date,
+    visits: Array<{ visitorId: string; createdAt: Date }>,
+  ) {
+    return Array.from({ length: days }, (_, index) => {
+      const date = new Date(from);
+      date.setUTCDate(from.getUTCDate() + index);
+      const key = date.toISOString().slice(0, 10);
+      const daily = visits.filter((visit) => visit.createdAt.toISOString().slice(0, 10) === key);
+      return {
+        date: key,
+        label: date.toLocaleDateString('en', { month: 'short', day: 'numeric', timeZone: 'UTC' }),
+        visits: daily.length,
+        visitors: new Set(daily.map((visit) => visit.visitorId)).size,
+      };
+    });
+  }
+
+  private topPages(visits: Array<{ path: string; visitorId: string }>) {
+    const pages = new Map<string, { visits: number; visitors: Set<string> }>();
+    for (const visit of visits) {
+      const page = pages.get(visit.path) ?? { visits: 0, visitors: new Set<string>() };
+      page.visits += 1;
+      page.visitors.add(visit.visitorId);
+      pages.set(visit.path, page);
+    }
+    return [...pages.entries()]
+      .map(([path, value]) => ({ path, visits: value.visits, visitors: value.visitors.size }))
+      .sort((left, right) => right.visits - left.visits)
+      .slice(0, 12);
+  }
+
+  private deviceBreakdown(visits: Array<{ device: string }>) {
+    return ['desktop', 'mobile', 'tablet', 'bot'].map((device) => ({
+      device,
+      visits: visits.filter((visit) => visit.device === device).length,
+    }));
+  }
+
+  private serializeRun(run: Awaited<ReturnType<typeof this.runsType>>[number]) {
+    return {
+      id: run.id,
+      user:
+        run.user ??
+        (run.ownerName || run.ownerEmail
+          ? {
+              id: run.userId ?? 'deleted',
+              name: run.ownerName ?? 'Deleted user',
+              email: run.ownerEmail ?? '',
+              role: 'USER',
+            }
+          : null),
+      status: run.status.toLowerCase(),
+      provider: run.provider,
+      model: run.model,
+      quality: run.quality,
+      imageSize: run.imageSize,
+      category: run.category,
+      sceneId: run.sceneId,
+      brief: run.brief,
+      creativeOptions: run.creativeOptions,
+      inputUrl: `/generations/${run.id}/input`,
+      resultUrls: run.outputKeys.map(
+        (_key, index) => `/generations/${run.id}/results/${index + 1}`,
+      ),
+      requestedVariants: run.requestedVariants,
+      completedVariants: run.outputKeys.length,
+      inputTokens: run.inputTokens,
+      inputTextTokens: run.inputTextTokens,
+      inputImageTokens: run.inputImageTokens,
+      outputTokens: run.outputTokens,
+      totalTokens: run.totalTokens,
+      providerUsageUnits: Number(run.providerUsageUnits),
+      providerUsageUnit: run.providerUsageUnit,
+      costUsd: Number(run.costUsd),
+      durationMs: run.durationMs,
+      error: run.error,
+      errorCode: run.errorCode,
+      createdAt: run.createdAt,
+    };
   }
 
   private providerBreakdown(runs: Awaited<ReturnType<typeof this.runsType>>) {

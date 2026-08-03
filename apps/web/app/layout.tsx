@@ -13,6 +13,7 @@ import '@fontsource/tajawal/700.css';
 import '@fontsource/tajawal/800.css';
 import '@fontsource/tajawal/900.css';
 import './globals.css';
+import { SiteVisitTracker } from './components/site-visit-tracker';
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'),
@@ -42,7 +43,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <SiteVisitTracker />
+        {children}
+      </body>
     </html>
   );
 }

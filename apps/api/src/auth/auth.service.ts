@@ -34,7 +34,7 @@ export class AuthService implements OnModuleInit {
     await this.prisma.refreshSession.deleteMany({
       where: { OR: [{ expiresAt: { lt: new Date() } }, { revokedAt: { not: null } }] },
     });
-    if (this.config.get<string>('NODE_ENV') !== 'production') await this.ensureDemoOwner();
+    await this.ensureSuperAdmin();
   }
 
   async login(dto: LoginDto): Promise<AuthResponse> {
@@ -42,7 +42,12 @@ export class AuthService implements OnModuleInit {
     if (!user?.isActive || !(await compare(dto.password, user.passwordHash))) {
       throw new UnauthorizedException('Email or password is incorrect');
     }
-    return this.issueTokens(user);
+    const authenticatedUser = await this.prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date(), loginCount: { increment: 1 } },
+    });
+    await this.revokeUserSessions(user.id);
+    return this.issueTokens(authenticatedUser);
   }
 
   async refresh(refreshToken: string): Promise<AuthResponse> {
@@ -61,10 +66,12 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('The refresh token is invalid');
     }
 
-    await this.prisma.refreshSession.update({
-      where: { id: session.id },
+    const revoked = await this.prisma.refreshSession.updateMany({
+      where: { id: session.id, userId: session.userId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    if (revoked.count !== 1)
+      throw new UnauthorizedException('The refresh session is no longer valid');
     return this.issueTokens(session.user);
   }
 
@@ -85,7 +92,7 @@ export class AuthService implements OnModuleInit {
     const refreshTtl = this.config.getOrThrow<number>('JWT_REFRESH_TTL_SECONDS');
     const sessionId = randomUUID();
     const accessToken = await this.jwt.signAsync(
-      { sub: user.id, email: user.email, role: user.role, type: 'access' },
+      { sub: user.id, sid: sessionId, email: user.email, role: user.role, type: 'access' },
       {
         secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
         expiresIn: accessTtl,
@@ -134,18 +141,47 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  private async ensureDemoOwner(): Promise<void> {
-    const email = this.config.getOrThrow<string>('DEMO_USER_EMAIL').trim().toLowerCase();
+  private async ensureSuperAdmin(): Promise<void> {
+    const superAdmin = await this.prisma.user.findFirst({
+      where: { role: Role.SUPER_ADMIN },
+      select: { id: true },
+    });
+    if (superAdmin) return;
+
+    const isProduction = this.config.get<string>('NODE_ENV') === 'production';
+    const email = this.config
+      .getOrThrow<string>(isProduction ? 'BOOTSTRAP_ADMIN_EMAIL' : 'DEMO_USER_EMAIL')
+      .trim()
+      .toLowerCase();
+    const password = this.config.getOrThrow<string>(
+      isProduction ? 'BOOTSTRAP_ADMIN_PASSWORD' : 'DEMO_USER_PASSWORD',
+    );
+    const name = isProduction
+      ? this.config.getOrThrow<string>('BOOTSTRAP_ADMIN_NAME')
+      : 'Alex Morgan';
     const existing = await this.prisma.user.findUnique({ where: { email } });
-    if (existing) return;
+    if (existing) {
+      await this.prisma.user.update({
+        where: { id: existing.id },
+        data: { role: Role.SUPER_ADMIN, isActive: true },
+      });
+      return;
+    }
 
     await this.prisma.user.create({
       data: {
         email,
-        name: 'Alex Morgan',
-        passwordHash: await hash(this.config.getOrThrow<string>('DEMO_USER_PASSWORD'), 12),
-        role: Role.OWNER,
+        name,
+        passwordHash: await hash(password, 12),
+        role: Role.SUPER_ADMIN,
       },
+    });
+  }
+
+  private async revokeUserSessions(userId: string): Promise<void> {
+    await this.prisma.refreshSession.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
     });
   }
 

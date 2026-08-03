@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  Activity,
   AlertTriangle,
   BarChart3,
   CheckCircle2,
@@ -12,11 +13,13 @@ import {
   LoaderCircle,
   LogOut,
   Menu,
+  Pencil,
   Plus,
   RefreshCw,
   Server,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UserRoundCog,
   Users,
   X,
@@ -34,7 +37,7 @@ import {
   type StudioUser,
 } from '../lib/auth-client';
 
-type Section = 'overview' | 'usage' | 'generations' | 'users' | 'system';
+type Section = 'overview' | 'traffic' | 'usage' | 'generations' | 'users' | 'system';
 type Range = 7 | 30 | 90;
 
 type AdminOverview = {
@@ -48,6 +51,8 @@ type AdminOverview = {
     failed: number;
     totalUsers: number;
     activeUsers: number;
+    siteVisits: number;
+    uniqueVisitors: number;
     waitlistSubscribers: number;
     totalTokens: number;
     providerUsageUnits: number;
@@ -61,6 +66,14 @@ type AdminOverview = {
     spendUsd: number;
     failures: number;
   }>;
+  trafficTrend: Array<{
+    date: string;
+    label: string;
+    visits: number;
+    visitors: number;
+  }>;
+  topPages: Array<{ path: string; visits: number; visitors: number }>;
+  deviceBreakdown: Array<{ device: string; visits: number }>;
   categoryBreakdown: Array<{
     category: string;
     requests: number;
@@ -86,30 +99,11 @@ type AdminOverview = {
     images: number;
     spendUsd: number;
     totalTokens: number;
+    providerUsage: Array<{ provider: string; units: number; unit: string }>;
     failures: number;
     lastActivity: string | null;
   }>;
-  recentGenerations: Array<{
-    id: string;
-    user: Pick<StudioUser, 'id' | 'name' | 'email' | 'role'> | null;
-    status: string;
-    provider: string;
-    model: string;
-    quality: string;
-    imageSize: string;
-    category: string;
-    sceneId: string;
-    requestedVariants: number;
-    completedVariants: number;
-    totalTokens: number;
-    providerUsageUnits: number;
-    providerUsageUnit: string;
-    costUsd: number;
-    durationMs: number;
-    error: string | null;
-    errorCode: string | null;
-    createdAt: string;
-  }>;
+  recentGenerations: GenerationRun[];
   queue: {
     waiting: number;
     active: number;
@@ -136,6 +130,8 @@ type AdminOverview = {
     todayProviderUnits: number;
     remainingFreeUnits: number | null;
     estimatedImagesRemaining: number | null;
+    dailyCreditValueUsd: number | null;
+    remainingCreditValueUsd: number | null;
     latestProviderError: string | null;
     latestProviderErrorCode: string | null;
   };
@@ -148,22 +144,57 @@ type AdminOverview = {
   };
 };
 
-type TeamMember = {
+type GenerationRun = {
+  id: string;
+  user: Pick<StudioUser, 'id' | 'name' | 'email' | 'role'> | null;
+  status: string;
+  provider: string;
+  model: string;
+  quality: string;
+  imageSize: string;
+  category: string;
+  sceneId: string;
+  brief: string | null;
+  creativeOptions: Record<string, string> | null;
+  inputUrl: string;
+  resultUrls: string[];
+  requestedVariants: number;
+  completedVariants: number;
+  inputTokens: number;
+  inputTextTokens: number;
+  inputImageTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  providerUsageUnits: number;
+  providerUsageUnit: string;
+  costUsd: number;
+  durationMs: number;
+  error: string | null;
+  errorCode: string | null;
+  createdAt: string;
+};
+
+type GenerationAudit = { total: number; skip: number; take: number; items: GenerationRun[] };
+
+type UserAccount = {
   id: string;
   email: string;
   name: string;
   role: StudioUser['role'];
   isActive: boolean;
+  lastLoginAt: string | null;
+  loginCount: number;
   createdAt: string;
-  permissions: string[];
+  updatedAt: string;
   _count: { generations: number };
 };
 
 const navItems: Array<{ id: Section; label: string; icon: LucideIcon }> = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'traffic', label: 'Site analytics', icon: Activity },
   { id: 'usage', label: 'Usage & cost', icon: BarChart3 },
   { id: 'generations', label: 'Generations', icon: ImageIcon },
-  { id: 'users', label: 'Users & roles', icon: Users },
+  { id: 'users', label: 'Users', icon: Users },
   { id: 'system', label: 'System health', icon: Server },
 ];
 
@@ -198,12 +229,20 @@ function AdminDashboard() {
   const [section, setSection] = useState<Section>('overview');
   const [range, setRange] = useState<Range>(30);
   const [overview, setOverview] = useState<AdminOverview | null>(null);
-  const [team, setTeam] = useState<TeamMember[]>([]);
+  const [accounts, setAccounts] = useState<UserAccount[]>([]);
+  const [generationAudit, setGenerationAudit] = useState<GenerationAudit>({
+    total: 0,
+    skip: 0,
+    take: 100,
+    items: [],
+  });
   const [viewer, setViewer] = useState<StudioUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
+  const [selectedRun, setSelectedRun] = useState<GenerationRun | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const load = useCallback(
@@ -212,16 +251,19 @@ function AdminDashboard() {
       else setRefreshing(true);
       setMessage(null);
       try {
-        const [me, overviewResponse, usersResponse] = await Promise.all([
+        const [me, overviewResponse, usersResponse, generationsResponse] = await Promise.all([
           currentUser(),
           authFetch(`/admin/overview?days=${range}`),
           authFetch('/users'),
+          authFetch('/admin/generations?take=100'),
         ]);
         if (!overviewResponse.ok) throw new Error(await apiErrorMessage(overviewResponse));
         if (!usersResponse.ok) throw new Error(await apiErrorMessage(usersResponse));
+        if (!generationsResponse.ok) throw new Error(await apiErrorMessage(generationsResponse));
         setViewer(me);
         setOverview((await overviewResponse.json()) as AdminOverview);
-        setTeam((await usersResponse.json()) as TeamMember[]);
+        setAccounts((await usersResponse.json()) as UserAccount[]);
+        setGenerationAudit((await generationsResponse.json()) as GenerationAudit);
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Dashboard data could not be loaded.');
       } finally {
@@ -244,6 +286,18 @@ function AdminDashboard() {
   const signOut = async () => {
     await logout();
     router.replace('/admin/login');
+  };
+
+  const loadMoreGenerations = async () => {
+    const response = await authFetch(
+      `/admin/generations?take=100&skip=${generationAudit.items.length}`,
+    );
+    if (!response.ok) {
+      setMessage(await apiErrorMessage(response));
+      return;
+    }
+    const next = (await response.json()) as GenerationAudit;
+    setGenerationAudit((current) => ({ ...next, items: [...current.items, ...next.items] }));
   };
 
   if (loading && !overview) {
@@ -305,7 +359,7 @@ function AdminDashboard() {
             <span>{viewer?.name.slice(0, 2).toUpperCase() ?? 'AL'}</span>
             <div>
               <strong>{viewer?.name ?? 'Administrator'}</strong>
-              <small>{viewer?.role ?? 'OWNER'}</small>
+              <small>SUPER ADMIN</small>
             </div>
             <button type="button" onClick={signOut} aria-label="Sign out">
               <LogOut aria-hidden="true" />
@@ -391,15 +445,24 @@ function AdminDashboard() {
             </div>
           )}
           {section === 'overview' && overview && <Overview overview={overview} />}
+          {section === 'traffic' && overview && <Traffic overview={overview} />}
           {section === 'usage' && overview && <Usage overview={overview} />}
-          {section === 'generations' && overview && <Generations overview={overview} />}
+          {section === 'generations' && overview && (
+            <Generations
+              runs={generationAudit.items}
+              total={generationAudit.total}
+              onInspect={setSelectedRun}
+              onLoadMore={() => void loadMoreGenerations()}
+            />
+          )}
           {section === 'users' && overview && (
             <UsersPanel
-              team={team}
+              accounts={accounts}
               consumption={overview.userConsumption}
               reload={() => void load(true)}
               setMessage={setMessage}
               openInvite={() => setInviteOpen(true)}
+              editUser={setEditingUser}
             />
           )}
           {section === 'system' && overview && <SystemHealth overview={overview} />}
@@ -407,6 +470,16 @@ function AdminDashboard() {
       </section>
       {inviteOpen && (
         <AddUserModal close={() => setInviteOpen(false)} reload={() => void load(true)} />
+      )}
+      {editingUser && (
+        <EditUserModal
+          user={editingUser}
+          close={() => setEditingUser(null)}
+          reload={() => void load(true)}
+        />
+      )}
+      {selectedRun && (
+        <GenerationDetailModal run={selectedRun} close={() => setSelectedRun(null)} />
       )}
     </main>
   );
@@ -539,6 +612,140 @@ function QueueCard({ overview }: { overview: AdminOverview }) {
   );
 }
 
+function Traffic({ overview }: { overview: AdminOverview }) {
+  const maxVisits = Math.max(...overview.trafficTrend.map((day) => day.visits), 1);
+  const humanVisits = overview.deviceBreakdown
+    .filter((item) => item.device !== 'bot')
+    .reduce((sum, item) => sum + item.visits, 0);
+  return (
+    <>
+      <PageHeading
+        eyebrow="First-party analytics"
+        title="See who visits Aluna."
+        copy="Privacy-conscious page views, unique visitors, popular routes and device mix recorded by the application."
+      />
+      <section className="ops-metrics ops-metrics--three">
+        <article>
+          <div>
+            <Activity aria-hidden="true" />
+            <span>Live</span>
+          </div>
+          <small>Page views</small>
+          <strong>{compact(overview.summary.siteVisits)}</strong>
+          <p>Across the selected period</p>
+        </article>
+        <article>
+          <div>
+            <Users aria-hidden="true" />
+            <span>Unique</span>
+          </div>
+          <small>Visitors</small>
+          <strong>{compact(overview.summary.uniqueVisitors)}</strong>
+          <p>Anonymous browser identifiers</p>
+        </article>
+        <article>
+          <div>
+            <ShieldCheck aria-hidden="true" />
+            <span>Private</span>
+          </div>
+          <small>Human page views</small>
+          <strong>{compact(humanVisits)}</strong>
+          <p>No raw IP addresses stored</p>
+        </article>
+      </section>
+      <section className="ops-grid ops-grid--wide">
+        <article className="ops-card ops-chart-card">
+          <div className="ops-card-head">
+            <div>
+              <span>Traffic volume</span>
+              <h2>Visits by day</h2>
+            </div>
+            <strong>{overview.summary.uniqueVisitors} visitors</strong>
+          </div>
+          <div className="ops-bars" aria-label="Site visits by day">
+            {overview.trafficTrend.map((day, index) => (
+              <div key={day.date} title={`${day.label}: ${day.visits} visits`}>
+                <i
+                  style={{
+                    height: `${Math.max(day.visits ? (day.visits / maxVisits) * 100 : 3, 3)}%`,
+                  }}
+                />
+                <small>
+                  {index % Math.ceil(overview.trafficTrend.length / 7) === 0 ? day.label : ''}
+                </small>
+              </div>
+            ))}
+          </div>
+        </article>
+        <article className="ops-card">
+          <div className="ops-card-head">
+            <div>
+              <span>Device mix</span>
+              <h2>How people browse</h2>
+            </div>
+          </div>
+          <div className="ops-category-list">
+            {overview.deviceBreakdown.map((item) => (
+              <div key={item.device}>
+                <div>
+                  <strong>{item.device}</strong>
+                  <span>{item.visits} views</span>
+                </div>
+                <i>
+                  <b
+                    style={{
+                      width: `${overview.summary.siteVisits ? (item.visits / overview.summary.siteVisits) * 100 : 0}%`,
+                    }}
+                  />
+                </i>
+              </div>
+            ))}
+          </div>
+        </article>
+      </section>
+      <section className="ops-card ops-table-card">
+        <div className="ops-card-head">
+          <div>
+            <span>Popular routes</span>
+            <h2>Most visited pages</h2>
+          </div>
+          <strong>{overview.topPages.length} routes</strong>
+        </div>
+        <div className="ops-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Page</th>
+                <th>Views</th>
+                <th>Unique visitors</th>
+              </tr>
+            </thead>
+            <tbody>
+              {overview.topPages.length ? (
+                overview.topPages.map((page) => (
+                  <tr key={page.path}>
+                    <td>
+                      <strong>{page.path}</strong>
+                    </td>
+                    <td>{page.visits}</td>
+                    <td>{page.visitors}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td className="ops-empty" colSpan={3}>
+                    Visits will appear here as people browse the site.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
+}
+
 function Usage({ overview }: { overview: AdminOverview }) {
   const maxSpend = Math.max(...overview.categoryBreakdown.map((item) => item.spendUsd), 0.000001);
   return (
@@ -546,9 +753,9 @@ function Usage({ overview }: { overview: AdminOverview }) {
       <PageHeading
         eyebrow="Consumption center"
         title="Every image. Every dollar."
-        copy="Track provider requests, metered usage, estimated spend and consumption by team member."
+        copy="Track provider requests, metered usage, estimated spend and consumption by customer."
       />
-      <section className="ops-metrics ops-metrics--three">
+      <section className="ops-metrics">
         <article>
           <div>
             <ImageIcon aria-hidden="true" />
@@ -584,6 +791,25 @@ function Usage({ overview }: { overview: AdminOverview }) {
             {overview.platformUsage.connected
               ? 'Provider invoice data'
               : 'Local list-price estimate'}
+          </p>
+        </article>
+        <article>
+          <div>
+            <Gauge aria-hidden="true" />
+            <span>{overview.configuration.remainingFreeUnits === null ? 'Paid' : 'Today'}</span>
+          </div>
+          <small>Provider allowance remaining</small>
+          <strong>
+            {overview.configuration.remainingFreeUnits === null
+              ? 'Metered'
+              : compact(overview.configuration.remainingFreeUnits)}
+          </strong>
+          <p>
+            {overview.configuration.estimatedImagesRemaining === null
+              ? 'Controlled by provider billing'
+              : `About ${overview.configuration.estimatedImagesRemaining} images · ${money(
+                  overview.configuration.remainingCreditValueUsd ?? 0,
+                )} free value`}
           </p>
         </article>
       </section>
@@ -676,15 +902,69 @@ function Usage({ overview }: { overview: AdminOverview }) {
   );
 }
 
-function Generations({ overview }: { overview: AdminOverview }) {
+function Generations({
+  runs,
+  total,
+  onInspect,
+  onLoadMore,
+}: {
+  runs: GenerationRun[];
+  total: number;
+  onInspect: (run: GenerationRun) => void;
+  onLoadMore: () => void;
+}) {
+  const [search, setSearch] = useState('');
+  const [status, setStatus] = useState('all');
+  const filtered = runs.filter((run) => {
+    const needle = search.trim().toLowerCase();
+    const matchesSearch =
+      !needle ||
+      [run.id, run.category, run.sceneId, run.user?.name, run.user?.email]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(needle));
+    return matchesSearch && (status === 'all' || run.status === status);
+  });
   return (
     <>
       <PageHeading
         eyebrow="Generation ledger"
         title="Inspect every request."
-        copy="A traceable record of model settings, completed variants, timing, tokens, costs and failures."
+        copy="Open any operation to compare its source photo, generated outputs, settings, timing, usage, spend and errors."
       />
-      <RecentTable runs={overview.recentGenerations} detailed />
+      <section className="ops-card ops-table-card">
+        <div className="ops-card-head ops-audit-head">
+          <div>
+            <span>Complete database</span>
+            <h2>{total} generation operations</h2>
+          </div>
+          <div className="ops-audit-filters">
+            <input
+              aria-label="Search generation operations"
+              placeholder="Search user, email, category or ID"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <select
+              aria-label="Filter generation status"
+              value={status}
+              onChange={(event) => setStatus(event.target.value)}
+            >
+              <option value="all">All statuses</option>
+              <option value="done">Done</option>
+              <option value="failed">Failed</option>
+              <option value="generating">Generating</option>
+              <option value="analyzing">Analyzing</option>
+              <option value="queued">Queued</option>
+            </select>
+          </div>
+        </div>
+        <RecentTable runs={filtered} detailed onInspect={onInspect} />
+        {runs.length < total && (
+          <button className="ops-load-more" type="button" onClick={onLoadMore}>
+            Load more operations
+          </button>
+        )}
+      </section>
     </>
   );
 }
@@ -692,19 +972,23 @@ function Generations({ overview }: { overview: AdminOverview }) {
 function RecentTable({
   runs,
   detailed = false,
+  onInspect,
 }: {
-  runs: AdminOverview['recentGenerations'];
+  runs: GenerationRun[];
   detailed?: boolean;
+  onInspect?: (run: GenerationRun) => void;
 }) {
   return (
-    <section className="ops-card ops-table-card">
-      <div className="ops-card-head">
-        <div>
-          <span>Live database</span>
-          <h2>{detailed ? 'All recent generations' : 'Recent generations'}</h2>
+    <section className={detailed ? 'ops-audit-table' : 'ops-card ops-table-card'}>
+      {!detailed && (
+        <div className="ops-card-head">
+          <div>
+            <span>Live database</span>
+            <h2>Recent generations</h2>
+          </div>
+          <strong>{runs.length} shown</strong>
         </div>
-        <strong>{runs.length} shown</strong>
-      </div>
+      )}
       <div className="ops-table-wrap">
         <table>
           <thead>
@@ -717,6 +1001,7 @@ function RecentTable({
               <th>Usage</th>
               <th>Cost</th>
               <th>Created</th>
+              {onInspect && <th>Details</th>}
             </tr>
           </thead>
           <tbody>
@@ -752,12 +1037,23 @@ function RecentTable({
                   </td>
                   <td>{money(run.costUsd)}</td>
                   <td>{dateTime(run.createdAt)}</td>
+                  {onInspect && (
+                    <td>
+                      <button
+                        className="ops-view-button"
+                        type="button"
+                        onClick={() => onInspect(run)}
+                      >
+                        View
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))
             ) : (
               <tr>
-                <td colSpan={detailed ? 8 : 7} className="ops-empty">
-                  No generation activity in this period.
+                <td colSpan={detailed ? (onInspect ? 9 : 8) : 7} className="ops-empty">
+                  No generation activity matches these filters.
                 </td>
               </tr>
             )}
@@ -769,25 +1065,27 @@ function RecentTable({
 }
 
 function UsersPanel({
-  team,
+  accounts,
   consumption,
   reload,
   setMessage,
   openInvite,
+  editUser,
 }: {
-  team: TeamMember[];
+  accounts: UserAccount[];
   consumption: AdminOverview['userConsumption'];
   reload: () => void;
   setMessage: (message: string | null) => void;
   openInvite: () => void;
+  editUser: (user: UserAccount) => void;
 }) {
-  const update = async (id: string, path: 'role' | 'status', body: object) => {
+  const updateStatus = async (id: string, isActive: boolean) => {
     setMessage(null);
     try {
-      const response = await authFetch(`/users/${id}/${path}`, {
+      const response = await authFetch(`/users/${id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ isActive }),
       });
       if (!response.ok) throw new Error(await apiErrorMessage(response));
       reload();
@@ -795,18 +1093,31 @@ function UsersPanel({
       setMessage(error instanceof Error ? error.message : 'User could not be updated.');
     }
   };
+  const deleteUser = async (user: UserAccount) => {
+    if (!window.confirm(`Delete ${user.name}'s account? Their generation history will be kept.`)) {
+      return;
+    }
+    setMessage(null);
+    try {
+      const response = await authFetch(`/users/${user.id}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'User could not be deleted.');
+    }
+  };
   return (
     <>
       <PageHeading
         eyebrow="Access control"
-        title="People, roles and consumption."
-        copy="Create accounts, assign permissions, suspend access and see exactly who is using image generation."
+        title="Customers and consumption."
+        copy="Create individual Studio accounts, suspend access, and see every customer's images, provider usage, spend, failures, and last activity."
       />
       <section className="ops-card ops-users-card">
         <div className="ops-card-head">
           <div>
-            <span>Workspace team</span>
-            <h2>{team.length} user accounts</h2>
+            <span>Customer accounts</span>
+            <h2>{accounts.length} accounts</h2>
           </div>
           <button className="ops-inline-button" type="button" onClick={openInvite}>
             <Plus aria-hidden="true" />
@@ -814,8 +1125,12 @@ function UsersPanel({
           </button>
         </div>
         <div className="ops-user-list">
-          {team.map((user) => {
+          {accounts.map((user) => {
             const usage = consumption.find((item) => item.id === user.id);
+            const usageLabel = usage?.providerUsage.length
+              ? usage.providerUsage.map((item) => `${compact(item.units)} ${item.unit}`).join(' + ')
+              : '0 units';
+            const isSuperAdmin = user.role === 'SUPER_ADMIN';
             return (
               <article key={user.id}>
                 <div className="ops-user-identity">
@@ -823,35 +1138,63 @@ function UsersPanel({
                   <div>
                     <strong>{user.name}</strong>
                     <small>{user.email}</small>
+                    <em>
+                      {isSuperAdmin ? 'Super Admin' : 'Studio user'} ·{' '}
+                      {user.lastLoginAt
+                        ? `Last login ${dateTime(user.lastLoginAt)}`
+                        : usage?.lastActivity
+                          ? `Last generation ${dateTime(usage.lastActivity)}`
+                          : 'No activity'}
+                    </em>
                   </div>
                 </div>
                 <div className="ops-user-stat">
                   <small>Requests</small>
                   <strong>{usage?.requests ?? 0}</strong>
+                  <em>{user.loginCount} logins</em>
+                </div>
+                <div className="ops-user-stat">
+                  <small>Images</small>
+                  <strong>{usage?.images ?? 0}</strong>
+                </div>
+                <div className="ops-user-stat">
+                  <small>Provider usage</small>
+                  <strong>{usageLabel}</strong>
                 </div>
                 <div className="ops-user-stat">
                   <small>Spend</small>
                   <strong>{money(usage?.spendUsd ?? 0)}</strong>
+                  <em>{usage?.failures ?? 0} failed</em>
                 </div>
-                <label>
-                  <span>Role</span>
-                  <select
-                    value={user.role}
-                    onChange={(event) => void update(user.id, 'role', { role: event.target.value })}
+                <div className="ops-user-controls">
+                  <button
+                    className={`ops-user-state ${user.isActive ? 'is-active' : ''}`}
+                    type="button"
+                    disabled={isSuperAdmin}
+                    onClick={() => void updateStatus(user.id, !user.isActive)}
                   >
-                    <option>OWNER</option>
-                    <option>ADMIN</option>
-                    <option>CREATOR</option>
-                    <option>VIEWER</option>
-                  </select>
-                </label>
-                <button
-                  className={`ops-user-state ${user.isActive ? 'is-active' : ''}`}
-                  type="button"
-                  onClick={() => void update(user.id, 'status', { isActive: !user.isActive })}
-                >
-                  {user.isActive ? 'Active' : 'Suspended'}
-                </button>
+                    {isSuperAdmin ? 'Protected' : user.isActive ? 'Active' : 'Suspended'}
+                  </button>
+                  <div className="ops-user-actions">
+                    <button
+                      type="button"
+                      disabled={isSuperAdmin}
+                      onClick={() => editUser(user)}
+                      aria-label={`Edit ${user.name}`}
+                    >
+                      <Pencil aria-hidden="true" />
+                    </button>
+                    <button
+                      className="is-danger"
+                      type="button"
+                      disabled={isSuperAdmin}
+                      onClick={() => void deleteUser(user)}
+                      aria-label={`Delete ${user.name}`}
+                    >
+                      <Trash2 aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
               </article>
             );
           })}
@@ -985,7 +1328,6 @@ function AddUserModal({ close, reload }: { close: () => void; reload: () => void
       name: form.get('name'),
       email: form.get('email'),
       password: form.get('password'),
-      role: form.get('role'),
     };
     try {
       const response = await authFetch('/users', {
@@ -1020,7 +1362,10 @@ function AddUserModal({ close, reload }: { close: () => void; reload: () => void
             <X aria-hidden="true" />
           </button>
         </div>
-        <p>The user can sign in immediately with the password you set.</p>
+        <p>
+          The customer receives one personal Studio account and can use every campaign and asset
+          feature. Admin analytics remain private to the Super Admin.
+        </p>
         {error && <div className="ops-form-error">{error}</div>}
         <label>
           <span>Full name</span>
@@ -1041,14 +1386,6 @@ function AddUserModal({ close, reload }: { close: () => void; reload: () => void
             placeholder="At least 12 characters"
           />
         </label>
-        <label>
-          <span>Role</span>
-          <select name="role" defaultValue="CREATOR">
-            <option value="ADMIN">Admin — full operations access</option>
-            <option value="CREATOR">Creator — generate and manage assets</option>
-            <option value="VIEWER">Viewer — read-only access</option>
-          </select>
-        </label>
         <button className="ops-submit" type="submit" disabled={saving}>
           {saving ? (
             <LoaderCircle className="is-spinning" aria-hidden="true" />
@@ -1058,6 +1395,238 @@ function AddUserModal({ close, reload }: { close: () => void; reload: () => void
           {saving ? 'Creating account' : 'Create account'}
         </button>
       </form>
+    </div>
+  );
+}
+
+function EditUserModal({
+  user,
+  close,
+  reload,
+}: {
+  user: UserAccount;
+  close: () => void;
+  reload: () => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    const form = new FormData(event.currentTarget);
+    const password = String(form.get('password') ?? '');
+    const payload = {
+      name: form.get('name'),
+      email: form.get('email'),
+      ...(password ? { password } : {}),
+    };
+    try {
+      const response = await authFetch(`/users/${user.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      close();
+      reload();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Account could not be updated.');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="ops-modal" role="dialog" aria-modal="true" aria-labelledby="edit-user-title">
+      <button
+        className="ops-modal-backdrop"
+        type="button"
+        onClick={close}
+        aria-label="Close dialog"
+      />
+      <form onSubmit={submit}>
+        <div className="ops-modal-head">
+          <div>
+            <span>Account data</span>
+            <h2 id="edit-user-title">Edit {user.name}</h2>
+          </div>
+          <button type="button" onClick={close} aria-label="Close dialog">
+            <X aria-hidden="true" />
+          </button>
+        </div>
+        <p>Changing the password immediately signs this user out of every device.</p>
+        {error && <div className="ops-form-error">{error}</div>}
+        <label>
+          <span>Full name</span>
+          <input name="name" minLength={2} maxLength={80} required defaultValue={user.name} />
+        </label>
+        <label>
+          <span>Email address</span>
+          <input name="email" type="email" required defaultValue={user.email} />
+        </label>
+        <label>
+          <span>New password · optional</span>
+          <input
+            name="password"
+            type="password"
+            minLength={12}
+            maxLength={128}
+            placeholder="Leave blank to keep the current password"
+          />
+        </label>
+        <button className="ops-submit" type="submit" disabled={saving}>
+          {saving ? (
+            <LoaderCircle className="is-spinning" aria-hidden="true" />
+          ) : (
+            <Pencil aria-hidden="true" />
+          )}
+          {saving ? 'Saving changes' : 'Save account'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function ProtectedAsset({ path, label }: { path: string; label: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | undefined;
+    void authFetch(path)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await apiErrorMessage(response));
+        objectUrl = URL.createObjectURL(await response.blob());
+        if (active) setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path]);
+
+  if (failed) return <div className="ops-protected-asset is-empty">Preview unavailable</div>;
+  if (!url) return <div className="ops-protected-asset is-empty">Loading image</div>;
+  return (
+    <div
+      className="ops-protected-asset"
+      role="img"
+      aria-label={label}
+      style={{ backgroundImage: `url(${url})` }}
+    />
+  );
+}
+
+function GenerationDetailModal({ run, close }: { run: GenerationRun; close: () => void }) {
+  return (
+    <div
+      className="ops-modal ops-audit-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="audit-title"
+    >
+      <button
+        className="ops-modal-backdrop"
+        type="button"
+        onClick={close}
+        aria-label="Close dialog"
+      />
+      <section className="ops-modal-panel">
+        <div className="ops-modal-head">
+          <div>
+            <span>Generation operation</span>
+            <h2 id="audit-title">{run.user?.name ?? 'System / CLI'}</h2>
+            <small>{run.id}</small>
+          </div>
+          <button type="button" onClick={close} aria-label="Close dialog">
+            <X aria-hidden="true" />
+          </button>
+        </div>
+        <div className="ops-audit-summary">
+          <div>
+            <small>Status</small>
+            <span className={`ops-status ops-status--${run.status}`}>{run.status}</span>
+          </div>
+          <div>
+            <small>Owner</small>
+            <strong>{run.user?.email || 'No linked account'}</strong>
+          </div>
+          <div>
+            <small>Created</small>
+            <strong>{dateTime(run.createdAt)}</strong>
+          </div>
+          <div>
+            <small>Duration</small>
+            <strong>{(run.durationMs / 1_000).toFixed(1)} seconds</strong>
+          </div>
+          <div>
+            <small>Usage</small>
+            <strong>
+              {compact(run.providerUsageUnits || run.totalTokens)} {run.providerUsageUnit}
+            </strong>
+          </div>
+          <div>
+            <small>Cost</small>
+            <strong>{money(run.costUsd)}</strong>
+          </div>
+        </div>
+        <div className="ops-audit-media">
+          <article>
+            <span>Source photo</span>
+            <ProtectedAsset path={run.inputUrl} label="Generation source photo" />
+          </article>
+          {run.resultUrls.map((path, index) => (
+            <article key={path}>
+              <span>Output {String(index + 1).padStart(2, '0')}</span>
+              <ProtectedAsset path={path} label={`Generation output ${index + 1}`} />
+            </article>
+          ))}
+          {!run.resultUrls.length && (
+            <article>
+              <span>Outputs</span>
+              <div className="ops-protected-asset is-empty">No completed output</div>
+            </article>
+          )}
+        </div>
+        <div className="ops-audit-details">
+          <article>
+            <span>Campaign</span>
+            <strong className="ops-capitalize">
+              {run.category} · {run.sceneId}
+            </strong>
+            <p>{run.brief || 'No custom campaign brief.'}</p>
+          </article>
+          <article>
+            <span>Provider</span>
+            <strong>{run.model}</strong>
+            <p>
+              {run.provider} · {run.quality} · {run.imageSize} · {run.completedVariants}/
+              {run.requestedVariants} outputs
+            </p>
+          </article>
+          <article>
+            <span>Creative controls</span>
+            <strong>{Object.keys(run.creativeOptions ?? {}).length} saved choices</strong>
+            <p>
+              {Object.entries(run.creativeOptions ?? {})
+                .map(([key, value]) => `${key}: ${value}`)
+                .join(' · ') || 'Default scene controls were used.'}
+            </p>
+          </article>
+        </div>
+        {run.error && (
+          <div className="ops-alert ops-alert--error">
+            <AlertTriangle aria-hidden="true" />
+            <div>
+              <strong>{run.errorCode?.replaceAll('_', ' ') || 'Generation failed'}</strong>
+              <span>{run.error}</span>
+            </div>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

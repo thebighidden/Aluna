@@ -13,11 +13,16 @@ export class CreateGenerationDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(8)
+  @Max(12)
   variants = 1;
 
   @IsOptional()
   @IsString()
   @MaxLength(500)
   brief?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(8_000)
+  options?: string;
 }

@@ -33,25 +33,23 @@ export const STYLES_CONFIG = {
         promptTemplate: `${FIDELITY_SLOT}
 
 Create a premium fashion e-commerce hero image of this garment in a spacious warm-white cyclorama
-studio. Present it naturally on an invisible mannequin or carefully shaped ghost form so the original
-cut, drape, sleeve length, collar, hems, and closures are completely clear. Use a large diffused key
-light from camera-left, gentle fill, and a controlled rim light that reveals the true fabric texture
-without changing its color. Keep the composition minimal, centered, and full-product, with a soft
-grounding shadow and generous negative space. Camera: 85 mm product lens, eye level, crisp detail,
-neutral white balance, luxury catalogue finish.`,
+studio. Follow the supplied garment-presentation and model-casting direction while keeping the original
+cut, drape, sleeve length, collar, hems, and closures completely clear. Use a large diffused key light
+from camera-left, gentle fill, and a controlled rim light that reveals the true fabric texture without
+changing its color. Keep the result refined and uncluttered with a soft grounding shadow and generous
+negative space. Use crisp detail, neutral white balance, and a luxury catalogue finish.`,
       },
       {
         id: 'street',
         name: 'Modern Street',
         promptTemplate: `${FIDELITY_SLOT}
 
-Photograph the garment as the unmistakable hero of a refined urban fashion campaign. Show it being worn
-in a natural, anatomically correct way by a model whose face is outside the frame, on a quiet contemporary
-stone-and-glass streetscape just after sunrise. Pose and styling must reveal the entire garment without
-folds hiding logos, graphics, pockets, or construction details. Use soft directional daylight, subtle
-background motion blur, and a low-contrast city palette that does not contaminate the garment's true
-colors. Camera: 50 mm, slightly low eye line, shallow but sufficient depth of field, candid premium
-editorial realism.`,
+Photograph the garment as the unmistakable hero of a refined urban fashion campaign on a quiet
+contemporary stone-and-glass streetscape just after sunrise. Follow the supplied garment-presentation,
+model-casting, performance, and framing direction. Any person must be clearly adult and anatomically
+correct. Pose and styling must reveal the garment without folds hiding logos, graphics, pockets, or
+construction details. Use soft directional daylight, subtle background motion blur, and a low-contrast
+city palette that does not contaminate the garment's true colors. Keep candid premium editorial realism.`,
       },
       {
         id: 'detail',
@@ -59,11 +57,12 @@ editorial realism.`,
         promptTemplate: `${FIDELITY_SLOT}
 
 Create a tactile luxury campaign photograph focused on the garment's workmanship while still showing
-enough of its full form to identify the product. Arrange the unchanged garment in a deliberate, natural
-drape on a matte travertine surface with one restrained tonal textile prop placed well away from all
+enough of its full form to identify the product. Follow the supplied presentation and framing direction;
+when an on-model presentation is requested, make the model secondary to the garment and keep the chosen
+pose natural. Use a restrained tonal textile or matte travertine element placed well away from all
 branding. Use raking side light to reveal the authentic weave, seams, stitching, fasteners, and printed
-details; retain realistic micro-shadows and absolutely true color. Compose an elegant three-quarter
-overhead frame with selective depth of field, avoiding artificial smoothness or exaggerated texture.`,
+details; retain realistic micro-shadows and absolutely true color. Avoid artificial smoothness or
+exaggerated texture.`,
       },
     ],
   },

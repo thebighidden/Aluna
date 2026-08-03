@@ -14,7 +14,7 @@ export function AdminGate({ children }: { children: ReactNode }) {
     currentUser()
       .then((user) => {
         if (!active) return;
-        if (user.role === 'OWNER' || user.role === 'ADMIN') setAuthorized(true);
+        if (user.role === 'SUPER_ADMIN') setAuthorized(true);
         else router.replace('/studio');
       })
       .catch(() => router.replace('/admin/login'));

@@ -16,10 +16,8 @@ enum GenerationStatus {
 }
 
 enum Role {
-  OWNER
-  ADMIN
-  CREATOR
-  VIEWER
+  SUPER_ADMIN
+  USER
 }
 
 model User {
@@ -27,8 +25,10 @@ model User {
   email        String           @unique
   name         String
   passwordHash String
-  role         Role             @default(CREATOR)
+  role         Role             @default(USER)
   isActive     Boolean          @default(true)
+  lastLoginAt  DateTime?
+  loginCount   Int              @default(0)
   generations  Generation[]
   sessions     RefreshSession[]
   createdAt    DateTime         @default(now())
@@ -56,6 +56,8 @@ model Generation {
   id                 String           @id @default(cuid())
   userId             String?
   user               User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  ownerName           String?
+  ownerEmail          String?
   status             GenerationStatus @default(QUEUED)
   provider           String           @default("openai")
   model              String           @default("gpt-image-2")
@@ -64,6 +66,7 @@ model Generation {
   category           String
   sceneId            String
   brief              String?
+  creativeOptions    Json?
   inputKey           String
   outputKeys         String[]         @default([])
   requestedVariants  Int              @default(1)
@@ -86,6 +89,21 @@ model Generation {
   @@index([userId])
   @@index([provider, createdAt])
   @@map("generation_runs")
+}
+
+model SiteVisit {
+  id        String   @id @default(cuid())
+  path      String
+  visitorId String
+  referrer  String?
+  country   String?
+  device    String   @default("desktop")
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([visitorId, createdAt])
+  @@index([path, createdAt])
+  @@map("site_visits")
 }
 
 model WaitlistSubscriber {

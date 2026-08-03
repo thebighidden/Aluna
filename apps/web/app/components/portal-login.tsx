@@ -1,6 +1,6 @@
 'use client';
 
-/* eslint-disable @next/next/no-img-element */
+import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useState } from 'react';
@@ -14,11 +14,11 @@ type PortalLoginProps = {
 const portalMedia = {
   studio: {
     destination: '/studio',
-    image: '/images/aluna-dashboard-login-operations.png',
+    image: '/images/aluna-dashboard-login-operations.webp',
   },
   dashboard: {
     destination: '/admin',
-    image: '/images/aluna-studio-login-fashion.png',
+    image: '/images/aluna-studio-login-fashion.webp',
   },
 } as const;
 
@@ -247,7 +247,14 @@ export function PortalLogin({ portal }: PortalLoginProps) {
       </section>
 
       <section className="portal-login-visual" aria-label={content.imageLabel}>
-        <img src={media.image} alt={content.imageAlt} />
+        <Image
+          src={media.image}
+          alt={content.imageAlt}
+          fill
+          priority
+          quality={84}
+          sizes="(max-width: 820px) 100vw, 54vw"
+        />
         <div className="portal-login-visual-shade" />
         <div className="portal-login-visual-copy">
           <span>{content.imageLabel}</span>

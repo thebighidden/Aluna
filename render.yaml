@@ -1,0 +1,73 @@
+services:
+  - type: web
+    name: aluna-api
+    runtime: node
+    region: frankfurt
+    plan: free
+    branch: codex/complete-aluna-platform
+    buildCommand: corepack enable && corepack prepare pnpm@10.12.1 --activate && pnpm install --frozen-lockfile && pnpm --filter @product-photo/api prisma:generate && pnpm --filter @product-photo/api build
+    startCommand: pnpm --filter @product-photo/api prisma:deploy && pnpm --filter @product-photo/api start
+    healthCheckPath: /health
+    domains:
+      - api.aluna.thebighidden.com
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aluna-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: aluna-redis
+          property: connectionString
+      - key: CORS_ORIGINS
+        value: https://aluna.thebighidden.com
+      - key: GENERATION_PROVIDER
+        value: cloudflare
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: CLOUDFLARE_AI_MODEL
+        value: '@cf/black-forest-labs/flux-2-klein-9b'
+      - key: CLOUDFLARE_AI_DAILY_NEURON_BUDGET
+        value: 10000
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: BOOTSTRAP_ADMIN_NAME
+        value: Aluna Administrator
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+
+  - type: keyvalue
+    name: aluna-redis
+    region: frankfurt
+    plan: free
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+
+databases:
+  - name: aluna-postgres
+    region: frankfurt
+    plan: free
+    databaseName: aluna
+    user: aluna
+    postgresMajorVersion: '16'
+    ipAllowList: []
