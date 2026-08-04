@@ -2,6 +2,7 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
+import { MoveHorizontal } from 'lucide-react';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { LanguageToggle, useLanguagePreference } from './components/language-toggle';
 import type { LocalizedText } from './components/language-toggle';
@@ -514,19 +515,21 @@ function BeforeAfter({
     <div className="aluna-compare-frame">
       <Image
         className="aluna-compare-base"
-        src={before}
-        alt={beforeAlt}
+        src={after}
+        alt={afterAlt}
         fill
         quality={82}
         sizes="(max-width: 900px) 92vw, 58vw"
       />
-      <div className="aluna-compare-after" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}>
-        <Image src={after} alt={afterAlt} fill quality={82} sizes="(max-width: 900px) 92vw, 58vw" />
+      <div className="aluna-compare-before" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}>
+        <Image src={before} alt={beforeAlt} fill quality={82} sizes="(max-width: 900px) 92vw, 58vw" />
       </div>
       <span className="aluna-compare-label aluna-compare-label--before">{beforeLabel}</span>
       <span className="aluna-compare-label aluna-compare-label--after">{afterLabel}</span>
       <span className="aluna-compare-line" style={{ left: `${position}%` }} aria-hidden="true">
-        <i>↔</i>
+        <i>
+          <MoveHorizontal aria-hidden="true" />
+        </i>
       </span>
       <input
         aria-label={`${compareLabel} ${label}`}

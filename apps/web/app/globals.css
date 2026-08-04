@@ -3790,8 +3790,8 @@ html[lang='ar'] .portal-login :where(a, button, label, small, span) {
 }
 
 .aluna-compare-frame > img,
-.aluna-compare-after,
-.aluna-compare-after img {
+.aluna-compare-before,
+.aluna-compare-before img {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -3805,7 +3805,7 @@ html[lang='ar'] .portal-login :where(a, button, label, small, span) {
   pointer-events: none;
 }
 
-.aluna-compare-after {
+.aluna-compare-before {
   z-index: 2;
   overflow: hidden;
   will-change: clip-path;
@@ -3839,6 +3839,16 @@ html[lang='ar'] .portal-login :where(a, button, label, small, span) {
   font-size: 1.05rem;
   font-style: normal;
   font-weight: 900;
+}
+
+.aluna-compare-line svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .aluna-compare-frame input {
@@ -4575,6 +4585,8 @@ html[lang='ar'] .portal-login :where(a, button, label, small, span) {
   }
 
   .aluna-hero-title {
+    display: grid;
+    row-gap: 0.12em;
     font-size: clamp(3.8rem, 18vw, 6rem);
   }
 
