@@ -117,7 +117,7 @@ function defaultsForCategory(category?: CategoryPreset): Record<string, string> 
 }
 
 type RuntimeConfiguration = {
-  provider: 'cloudflare' | 'openai';
+  provider: 'cloudflare' | 'gemini' | 'openai';
   providerLabel: string;
   model: string;
   quality: string;
@@ -248,7 +248,7 @@ export default function StudioPage() {
   const [presets, setPresets] = useState<CategoryPreset[]>(fallbackPresets);
   const [category, setCategory] = useState('clothing');
   const [sceneId, setSceneId] = useState('studio');
-  const [variants, setVariants] = useState(4);
+  const [variants, setVariants] = useState(1);
   const [creativeOptions, setCreativeOptions] =
     useState<Record<string, string>>(clothingOptionDefaults);
   const [brief, setBrief] = useState('');
@@ -609,7 +609,11 @@ export default function StudioPage() {
           <div className="studio-top-actions">
             <span className="studio-engine-chip">
               <Sparkles size={13} />
-              {runtime?.provider === 'cloudflare' ? 'FLUX.2 Klein' : 'GPT Image 2'}
+              {runtime?.provider === 'cloudflare'
+                ? 'FLUX.2 Klein'
+                : runtime?.provider === 'gemini'
+                  ? 'Nano Banana'
+                  : 'GPT Image 2'}
             </span>
             <button type="button" aria-label="Notifications">
               <Bell size={18} />
@@ -662,6 +666,7 @@ export default function StudioPage() {
             selectedScene={selectedScene}
             submitting={submitting}
             variants={variants}
+            maxVariants={user?.maxVariantsPerRequest ?? 12}
             onBriefChange={setBrief}
             onCategoryChange={changeCategory}
             onCreativeOptionChange={changeCreativeOption}
@@ -716,6 +721,7 @@ type CreateSectionProps = {
   selectedScene?: ScenePreset;
   submitting: boolean;
   variants: number;
+  maxVariants: number;
   onBriefChange: (value: string) => void;
   onCategoryChange: (value: string) => void;
   onCreativeOptionChange: (optionId: string, value: string) => void;
@@ -966,23 +972,27 @@ function CreateSection(props: CreateSectionProps) {
                 <strong>{props.variants}</strong>
                 <button
                   type="button"
-                  onClick={() => props.onVariantsChange(Math.min(12, props.variants + 1))}
+                  onClick={() =>
+                    props.onVariantsChange(Math.min(props.maxVariants, props.variants + 1))
+                  }
                 >
                   +
                 </button>
               </div>
             </div>
             <div className="studio-variant-presets" aria-label="Quick variant count">
-              {[2, 4, 6, 8, 12].map((count) => (
-                <button
-                  className={props.variants === count ? 'active' : ''}
-                  key={count}
-                  type="button"
-                  onClick={() => props.onVariantsChange(count)}
-                >
-                  {count} images
-                </button>
-              ))}
+              {[1, 2, 4, 6, 8, 12]
+                .filter((count) => count <= props.maxVariants)
+                .map((count) => (
+                  <button
+                    className={props.variants === count ? 'active' : ''}
+                    key={count}
+                    type="button"
+                    onClick={() => props.onVariantsChange(count)}
+                  >
+                    {count} {count === 1 ? 'image' : 'images'}
+                  </button>
+                ))}
             </div>
           </section>
 
@@ -997,7 +1007,7 @@ function CreateSection(props: CreateSectionProps) {
                 ? statusCopy[props.activeGeneration.status]
                 : 'Sending to studio'
               : props.canGenerate
-                ? `Generate ${props.variants} images`
+                ? `Generate ${props.variants} ${props.variants === 1 ? 'image' : 'images'}`
                 : !props.hasGenerationPermission
                   ? 'Your role cannot generate'
                   : !props.engineConfigured
@@ -1284,9 +1294,11 @@ function HistorySection({ generations }: { generations: Generation[] }) {
                 <td>
                   {item.provider === 'openai'
                     ? 'GPT Image 2'
-                    : item.provider === 'cloudflare'
-                      ? 'FLUX.2 Klein'
-                      : item.provider}
+                    : item.provider === 'gemini'
+                      ? 'Nano Banana'
+                      : item.provider === 'cloudflare'
+                        ? 'FLUX.2 Klein'
+                        : item.provider}
                 </td>
                 <td>{item.outputKeys.length}</td>
                 <td>{item.durationMs ? `${(item.durationMs / 1000).toFixed(1)}s` : '—'}</td>
@@ -1376,6 +1388,20 @@ function SettingsSection({ runtime, user }: { runtime?: RuntimeConfiguration; us
           <label>
             Account type
             <input value={user.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Studio user'} readOnly />
+          </label>
+          <label>
+            Request allowance
+            <input
+              value={`${user.requestLimitPerHour || 'Unlimited'} per hour · ${user.requestLimitPerDay || 'Unlimited'} per day`}
+              readOnly
+            />
+          </label>
+          <label>
+            Generation limits
+            <input
+              value={`${user.maxVariantsPerRequest} images per request · ${user.maxConcurrentRequests} concurrent`}
+              readOnly
+            />
           </label>
           <span className="studio-config-note">
             One active login is allowed. Signing in on a new device signs out the previous session.

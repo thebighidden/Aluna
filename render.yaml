@@ -37,6 +37,10 @@ services:
         value: '@cf/black-forest-labs/flux-2-klein-9b'
       - key: CLOUDFLARE_AI_DAILY_NEURON_BUDGET
         value: 10000
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_IMAGE_MODEL
+        value: gemini-2.5-flash-image
       - key: JWT_ACCESS_SECRET
         generateValue: true
       - key: JWT_REFRESH_SECRET

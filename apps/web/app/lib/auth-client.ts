@@ -8,6 +8,10 @@ export type StudioUser = {
   name: string;
   role: 'SUPER_ADMIN' | 'USER';
   permissions: string[];
+  requestLimitPerHour: number;
+  requestLimitPerDay: number;
+  maxVariantsPerRequest: number;
+  maxConcurrentRequests: number;
 };
 
 type AuthSession = {

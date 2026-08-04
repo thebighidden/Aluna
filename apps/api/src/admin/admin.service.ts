@@ -27,7 +27,7 @@ export class AdminService {
   ) {}
 
   async overview(days: number) {
-    const runtime = this.generationService.getRuntimeConfiguration();
+    const runtime = await this.generationService.getRuntimeConfiguration();
     const now = new Date();
     const from = new Date(now);
     from.setUTCHours(0, 0, 0, 0);
@@ -47,6 +47,7 @@ export class AdminService {
           email: true,
           role: true,
           isActive: true,
+          bannedUntil: true,
           lastLoginAt: true,
           loginCount: true,
           createdAt: true,
@@ -100,7 +101,9 @@ export class AdminService {
         averageDurationMs: completed.length ? Math.round(completedDuration / completed.length) : 0,
         failed: failed.length,
         totalUsers: users.length,
-        activeUsers: users.filter((user) => user.isActive).length,
+        activeUsers: users.filter(
+          (user) => user.isActive && (!user.bannedUntil || user.bannedUntil <= now),
+        ).length,
         siteVisits: visits.length,
         uniqueVisitors: new Set(visits.map((visit) => visit.visitorId)).size,
         waitlistSubscribers: waitlistCount,
@@ -175,9 +178,14 @@ export class AdminService {
             : 'Internal estimate',
         latestProviderError: latestProviderFailure?.error ?? null,
         latestProviderErrorCode: latestProviderFailure?.errorCode ?? null,
+        availableProviders: this.generationService.getProviderConfigurations(),
       },
       platformUsage,
     };
+  }
+
+  async setGenerationProvider(provider: GenerationProvider) {
+    return this.generationService.setGenerationProvider(provider);
   }
 
   async generations(query: AdminGenerationQueryDto) {
@@ -388,6 +396,17 @@ export class AdminService {
         connected: false,
         reason:
           'Cloudflare Workers AI usage is metered locally in neurons. The 10,000-neuron daily guard resets at 00:00 UTC.',
+        images: 0,
+        requests: 0,
+        costUsd: 0,
+        daily: [],
+      };
+    }
+    if (provider === 'gemini') {
+      return {
+        connected: false,
+        reason:
+          'Gemini usage and cost are tracked from each generation response. Google billing reconciliation is managed in Google AI Studio.',
         images: 0,
         requests: 0,
         costUsd: 0,

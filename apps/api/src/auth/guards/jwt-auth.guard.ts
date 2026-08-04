@@ -1,4 +1,10 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
@@ -30,36 +36,46 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('A valid bearer access token is required');
     }
 
+    let payload: AccessTokenPayload;
     try {
-      const payload = await this.jwt.verifyAsync<AccessTokenPayload>(token, {
+      payload = await this.jwt.verifyAsync<AccessTokenPayload>(token, {
         secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
       });
       if (payload.type !== 'access') throw new Error('Unexpected token type');
       if (!payload.sid) throw new Error('Access token has no active session');
-
-      const [user, session] = await Promise.all([
-        this.prisma.user.findUnique({ where: { id: payload.sub } }),
-        this.prisma.refreshSession.findUnique({ where: { id: payload.sid } }),
-      ]);
-      if (!user?.isActive) throw new Error('User is inactive');
-      if (
-        !session ||
-        session.userId !== user.id ||
-        session.revokedAt ||
-        session.expiresAt.getTime() <= Date.now()
-      ) {
-        throw new Error('Session is inactive');
-      }
-      request.user = {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        permissions: [...ROLE_PERMISSIONS[user.role]],
-      };
-      return true;
     } catch {
       throw new UnauthorizedException('The access token is invalid or expired');
     }
+
+    const [user, session] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: payload.sub } }),
+      this.prisma.refreshSession.findUnique({ where: { id: payload.sid } }),
+    ]);
+    if (!user?.isActive) throw new UnauthorizedException('This account has been deactivated');
+    if (user.bannedUntil && user.bannedUntil.getTime() > Date.now()) {
+      throw new ForbiddenException(
+        `This account is banned until ${user.bannedUntil.toISOString()}`,
+      );
+    }
+    if (
+      !session ||
+      session.userId !== user.id ||
+      session.revokedAt ||
+      session.expiresAt.getTime() <= Date.now()
+    ) {
+      throw new UnauthorizedException('The access token is invalid or expired');
+    }
+    request.user = {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      permissions: [...ROLE_PERMISSIONS[user.role]],
+      requestLimitPerHour: user.requestLimitPerHour,
+      requestLimitPerDay: user.requestLimitPerDay,
+      maxVariantsPerRequest: user.maxVariantsPerRequest,
+      maxConcurrentRequests: user.maxConcurrentRequests,
+    };
+    return true;
   }
 }

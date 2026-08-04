@@ -6,7 +6,9 @@ export const envValidationSchema = Joi.object({
   CORS_ORIGINS: Joi.string().default(
     'http://localhost:3000,http://localhost:4173,http://127.0.0.1:4173',
   ),
-  GENERATION_PROVIDER: Joi.string().valid('cloudflare', 'openai', 'auto').default('cloudflare'),
+  GENERATION_PROVIDER: Joi.string()
+    .valid('cloudflare', 'gemini', 'openai', 'auto')
+    .default('cloudflare'),
   OPENAI_API_KEY: Joi.string().trim().allow('').optional(),
   OPENAI_ADMIN_KEY: Joi.string().trim().allow('').optional(),
   DATABASE_URL: Joi.string()
@@ -19,6 +21,9 @@ export const envValidationSchema = Joi.object({
   OPENAI_IMAGE_QUALITY: Joi.string().valid('low', 'medium', 'high', 'auto').default('medium'),
   OPENAI_IMAGE_SIZE: Joi.string().trim().default('1024x1024'),
   OPENAI_IMAGE_OUTPUT_COST_USD: Joi.number().min(0).default(0.053),
+  GEMINI_API_KEY: Joi.string().trim().allow('').optional(),
+  GEMINI_IMAGE_MODEL: Joi.string().trim().default('gemini-2.5-flash-image'),
+  GEMINI_IMAGE_OUTPUT_COST_USD: Joi.number().min(0).default(0.039),
   CLOUDFLARE_ACCOUNT_ID: Joi.string().trim().allow('').optional(),
   CLOUDFLARE_API_TOKEN: Joi.string().trim().allow('').optional(),
   CLOUDFLARE_AI_MODEL: Joi.string().trim().default('@cf/black-forest-labs/flux-2-klein-9b'),

@@ -28,7 +28,6 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     Permission.AssetManage,
     Permission.PresetRead,
     Permission.SettingsRead,
-    Permission.SettingsManage,
   ],
 };
 

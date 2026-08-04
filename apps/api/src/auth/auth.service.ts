@@ -1,4 +1,9 @@
-import { Injectable, OnModuleInit, UnauthorizedException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  OnModuleInit,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Role, User } from '@prisma/client';
@@ -19,6 +24,10 @@ export interface AuthResponse {
     name: string;
     role: Role;
     permissions: readonly string[];
+    requestLimitPerHour: number;
+    requestLimitPerDay: number;
+    maxVariantsPerRequest: number;
+    maxConcurrentRequests: number;
   };
 }
 
@@ -39,8 +48,14 @@ export class AuthService implements OnModuleInit {
 
   async login(dto: LoginDto): Promise<AuthResponse> {
     const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
-    if (!user?.isActive || !(await compare(dto.password, user.passwordHash))) {
+    if (!user || !(await compare(dto.password, user.passwordHash))) {
       throw new UnauthorizedException('Email or password is incorrect');
+    }
+    if (!user.isActive) throw new ForbiddenException('This account has been deactivated');
+    if (user.bannedUntil && user.bannedUntil.getTime() > Date.now()) {
+      throw new ForbiddenException(
+        `This account is banned until ${user.bannedUntil.toISOString()}`,
+      );
     }
     const authenticatedUser = await this.prisma.user.update({
       where: { id: user.id },
@@ -58,6 +73,11 @@ export class AuthService implements OnModuleInit {
     });
     if (!session || session.userId !== payload.sub || session.revokedAt || !session.user.isActive) {
       throw new UnauthorizedException('The refresh session is no longer valid');
+    }
+    if (session.user.bannedUntil && session.user.bannedUntil.getTime() > Date.now()) {
+      throw new ForbiddenException(
+        `This account is banned until ${session.user.bannedUntil.toISOString()}`,
+      );
     }
     if (session.expiresAt.getTime() <= Date.now()) {
       throw new UnauthorizedException('The refresh session has expired');
@@ -125,6 +145,10 @@ export class AuthService implements OnModuleInit {
         name: user.name,
         role: user.role,
         permissions: ROLE_PERMISSIONS[user.role],
+        requestLimitPerHour: user.requestLimitPerHour,
+        requestLimitPerDay: user.requestLimitPerDay,
+        maxVariantsPerRequest: user.maxVariantsPerRequest,
+        maxConcurrentRequests: user.maxConcurrentRequests,
       },
     };
   }

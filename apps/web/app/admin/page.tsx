@@ -4,9 +4,12 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  Ban,
   CheckCircle2,
   ChevronRight,
   CircleDollarSign,
+  Clock3,
+  Cpu,
   Gauge,
   Image as ImageIcon,
   LayoutDashboard,
@@ -117,7 +120,7 @@ type AdminOverview = {
   };
   configuration: {
     provider: string;
-    providerId: 'cloudflare' | 'openai';
+    providerId: 'cloudflare' | 'gemini' | 'openai';
     configured: boolean;
     missingConfiguration: string[];
     model: string;
@@ -134,6 +137,16 @@ type AdminOverview = {
     remainingCreditValueUsd: number | null;
     latestProviderError: string | null;
     latestProviderErrorCode: string | null;
+    availableProviders: Array<{
+      provider: 'cloudflare' | 'gemini' | 'openai';
+      providerLabel: string;
+      model: string;
+      quality: string;
+      imageSize: string;
+      configured: boolean;
+      missingConfiguration: string[];
+      usageUnit: string;
+    }>;
   };
   platformUsage: {
     connected: boolean;
@@ -182,6 +195,17 @@ type UserAccount = {
   name: string;
   role: StudioUser['role'];
   isActive: boolean;
+  bannedUntil: string | null;
+  banReason: string | null;
+  requestLimitPerHour: number;
+  requestLimitPerDay: number;
+  maxVariantsPerRequest: number;
+  maxConcurrentRequests: number;
+  policyUsage: {
+    requestsThisHour: number;
+    requestsToday: number;
+    activeRequests: number;
+  };
   lastLoginAt: string | null;
   loginCount: number;
   createdAt: string;
@@ -465,7 +489,13 @@ function AdminDashboard() {
               editUser={setEditingUser}
             />
           )}
-          {section === 'system' && overview && <SystemHealth overview={overview} />}
+          {section === 'system' && overview && (
+            <SystemHealth
+              overview={overview}
+              reload={() => void load(true)}
+              setMessage={setMessage}
+            />
+          )}
         </div>
       </section>
       {inviteOpen && (
@@ -1106,6 +1136,23 @@ function UsersPanel({
       setMessage(error instanceof Error ? error.message : 'User could not be deleted.');
     }
   };
+  const updateBan = async (user: UserAccount, hours: number | null) => {
+    setMessage(null);
+    try {
+      const response = await authFetch(`/users/${user.id}/access`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bannedUntil: hours === null ? null : new Date(Date.now() + hours * 60 * 60 * 1_000),
+          banReason: hours === null ? null : 'Temporary suspension by Super Admin',
+        }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'User ban could not be updated.');
+    }
+  };
   return (
     <>
       <PageHeading
@@ -1131,6 +1178,9 @@ function UsersPanel({
               ? usage.providerUsage.map((item) => `${compact(item.units)} ${item.unit}`).join(' + ')
               : '0 units';
             const isSuperAdmin = user.role === 'SUPER_ADMIN';
+            const isBanned = Boolean(
+              user.bannedUntil && new Date(user.bannedUntil).getTime() > Date.now(),
+            );
             return (
               <article key={user.id}>
                 <div className="ops-user-identity">
@@ -1139,23 +1189,31 @@ function UsersPanel({
                     <strong>{user.name}</strong>
                     <small>{user.email}</small>
                     <em>
-                      {isSuperAdmin ? 'Super Admin' : 'Studio user'} ·{' '}
-                      {user.lastLoginAt
-                        ? `Last login ${dateTime(user.lastLoginAt)}`
-                        : usage?.lastActivity
-                          ? `Last generation ${dateTime(usage.lastActivity)}`
-                          : 'No activity'}
+                      {isSuperAdmin
+                        ? 'Super Admin · Protected'
+                        : isBanned
+                          ? `Banned until ${dateTime(user.bannedUntil)}`
+                          : user.lastLoginAt
+                            ? `Last login ${dateTime(user.lastLoginAt)}`
+                            : usage?.lastActivity
+                              ? `Last generation ${dateTime(usage.lastActivity)}`
+                              : 'Studio user · No activity'}
                     </em>
                   </div>
                 </div>
                 <div className="ops-user-stat">
                   <small>Requests</small>
-                  <strong>{usage?.requests ?? 0}</strong>
-                  <em>{user.loginCount} logins</em>
+                  <strong>
+                    {user.policyUsage.requestsThisHour}/{user.requestLimitPerHour || '∞'} hr
+                  </strong>
+                  <em>
+                    {user.policyUsage.requestsToday}/{user.requestLimitPerDay || '∞'} today
+                  </em>
                 </div>
                 <div className="ops-user-stat">
                   <small>Images</small>
                   <strong>{usage?.images ?? 0}</strong>
+                  <em>Max {user.maxVariantsPerRequest} per request</em>
                 </div>
                 <div className="ops-user-stat">
                   <small>Provider usage</small>
@@ -1168,14 +1226,29 @@ function UsersPanel({
                 </div>
                 <div className="ops-user-controls">
                   <button
-                    className={`ops-user-state ${user.isActive ? 'is-active' : ''}`}
+                    className={`ops-user-state ${user.isActive && !isBanned ? 'is-active' : ''}`}
                     type="button"
                     disabled={isSuperAdmin}
                     onClick={() => void updateStatus(user.id, !user.isActive)}
                   >
-                    {isSuperAdmin ? 'Protected' : user.isActive ? 'Active' : 'Suspended'}
+                    {isSuperAdmin
+                      ? 'Protected'
+                      : !user.isActive
+                        ? 'Deactivated'
+                        : isBanned
+                          ? 'Temporarily banned'
+                          : 'Active'}
                   </button>
                   <div className="ops-user-actions">
+                    <button
+                      className={isBanned ? 'is-warning' : ''}
+                      type="button"
+                      disabled={isSuperAdmin}
+                      onClick={() => void updateBan(user, isBanned ? null : 24)}
+                      aria-label={isBanned ? `Unban ${user.name}` : `Ban ${user.name} for 24 hours`}
+                    >
+                      {isBanned ? <Clock3 aria-hidden="true" /> : <Ban aria-hidden="true" />}
+                    </button>
                     <button
                       type="button"
                       disabled={isSuperAdmin}
@@ -1204,7 +1277,33 @@ function UsersPanel({
   );
 }
 
-function SystemHealth({ overview }: { overview: AdminOverview }) {
+function SystemHealth({
+  overview,
+  reload,
+  setMessage,
+}: {
+  overview: AdminOverview;
+  reload: () => void;
+  setMessage: (message: string | null) => void;
+}) {
+  const [savingProvider, setSavingProvider] = useState<string | null>(null);
+  const selectProvider = async (provider: 'cloudflare' | 'gemini' | 'openai') => {
+    setSavingProvider(provider);
+    setMessage(null);
+    try {
+      const response = await authFetch('/admin/generation-provider', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Generation model could not be changed.');
+    } finally {
+      setSavingProvider(null);
+    }
+  };
   const items = [
     {
       label: 'API & database',
@@ -1261,6 +1360,48 @@ function SystemHealth({ overview }: { overview: AdminOverview }) {
         title="Know what is healthy."
         copy="Operational status for the API, generation worker, Redis queue, storage and provider configuration."
       />
+      <section className="ops-card ops-model-control">
+        <div className="ops-card-head">
+          <div>
+            <span>Image engine</span>
+            <h2>Choose the active generation model</h2>
+          </div>
+          <Cpu aria-hidden="true" />
+        </div>
+        <p>
+          This is a global setting. New jobs use the selected engine; jobs already queued keep the
+          model they started with.
+        </p>
+        <div className="ops-model-options">
+          {overview.configuration.availableProviders.map((provider) => {
+            const isCurrent = provider.provider === overview.configuration.providerId;
+            return (
+              <article className={isCurrent ? 'is-current' : ''} key={provider.provider}>
+                <div>
+                  <span>{provider.providerLabel}</span>
+                  <strong>{provider.model}</strong>
+                  <small>
+                    {provider.quality} · {provider.imageSize}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  disabled={!provider.configured || isCurrent || Boolean(savingProvider)}
+                  onClick={() => void selectProvider(provider.provider)}
+                >
+                  {savingProvider === provider.provider
+                    ? 'Switching…'
+                    : isCurrent
+                      ? 'Active'
+                      : provider.configured
+                        ? 'Use model'
+                        : `Needs ${provider.missingConfiguration.join(' + ')}`}
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      </section>
       <section className="ops-system-grid">
         {items.map((item) => (
           <article key={item.label}>
@@ -1328,6 +1469,10 @@ function AddUserModal({ close, reload }: { close: () => void; reload: () => void
       name: form.get('name'),
       email: form.get('email'),
       password: form.get('password'),
+      requestLimitPerHour: Number(form.get('requestLimitPerHour')),
+      requestLimitPerDay: Number(form.get('requestLimitPerDay')),
+      maxVariantsPerRequest: Number(form.get('maxVariantsPerRequest')),
+      maxConcurrentRequests: Number(form.get('maxConcurrentRequests')),
     };
     try {
       const response = await authFetch('/users', {
@@ -1386,6 +1531,24 @@ function AddUserModal({ close, reload }: { close: () => void; reload: () => void
             placeholder="At least 12 characters"
           />
         </label>
+        <div className="ops-form-grid">
+          <label>
+            <span>Requests per hour</span>
+            <input name="requestLimitPerHour" type="number" min={0} max={10000} defaultValue={10} />
+          </label>
+          <label>
+            <span>Requests per day</span>
+            <input name="requestLimitPerDay" type="number" min={0} max={100000} defaultValue={30} />
+          </label>
+          <label>
+            <span>Images per request</span>
+            <input name="maxVariantsPerRequest" type="number" min={1} max={12} defaultValue={12} />
+          </label>
+          <label>
+            <span>Concurrent requests</span>
+            <input name="maxConcurrentRequests" type="number" min={1} max={10} defaultValue={1} />
+          </label>
+        </div>
         <button className="ops-submit" type="submit" disabled={saving}>
           {saving ? (
             <LoaderCircle className="is-spinning" aria-hidden="true" />
@@ -1416,18 +1579,37 @@ function EditUserModal({
     setError(null);
     const form = new FormData(event.currentTarget);
     const password = String(form.get('password') ?? '');
-    const payload = {
+    const accountPayload = {
       name: form.get('name'),
       email: form.get('email'),
       ...(password ? { password } : {}),
+    };
+    const banHours = String(form.get('banDuration') ?? 'unchanged');
+    const accessPayload = {
+      requestLimitPerHour: Number(form.get('requestLimitPerHour')),
+      requestLimitPerDay: Number(form.get('requestLimitPerDay')),
+      maxVariantsPerRequest: Number(form.get('maxVariantsPerRequest')),
+      maxConcurrentRequests: Number(form.get('maxConcurrentRequests')),
+      banReason: String(form.get('banReason') ?? '').trim() || null,
+      ...(banHours === 'clear'
+        ? { bannedUntil: null }
+        : banHours !== 'unchanged'
+          ? { bannedUntil: new Date(Date.now() + Number(banHours) * 60 * 60 * 1_000) }
+          : {}),
     };
     try {
       const response = await authFetch(`/users/${user.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(accountPayload),
       });
       if (!response.ok) throw new Error(await apiErrorMessage(response));
+      const accessResponse = await authFetch(`/users/${user.id}/access`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(accessPayload),
+      });
+      if (!accessResponse.ok) throw new Error(await apiErrorMessage(accessResponse));
       close();
       reload();
     } catch (caught) {
@@ -1454,7 +1636,10 @@ function EditUserModal({
             <X aria-hidden="true" />
           </button>
         </div>
-        <p>Changing the password immediately signs this user out of every device.</p>
+        <p>
+          Manage identity, timed bans and generation limits. Password changes and new bans sign the
+          user out of every device.
+        </p>
         {error && <div className="ops-form-error">{error}</div>}
         <label>
           <span>Full name</span>
@@ -1474,6 +1659,95 @@ function EditUserModal({
             placeholder="Leave blank to keep the current password"
           />
         </label>
+        <div className="ops-form-section">
+          <div>
+            <Ban aria-hidden="true" />
+            <span>Timed access ban</span>
+          </div>
+          <div className="ops-form-grid">
+            <label>
+              <span>Ban duration</span>
+              <select name="banDuration" defaultValue="unchanged">
+                <option value="unchanged">Keep current ban</option>
+                <option value="clear">No ban / clear ban</option>
+                <option value="1">1 hour</option>
+                <option value="6">6 hours</option>
+                <option value="24">1 day</option>
+                <option value="72">3 days</option>
+                <option value="168">7 days</option>
+                <option value="720">30 days</option>
+              </select>
+            </label>
+            <label>
+              <span>Reason</span>
+              <input
+                name="banReason"
+                maxLength={240}
+                defaultValue={user.banReason ?? ''}
+                placeholder="Optional internal reason"
+              />
+            </label>
+          </div>
+          {user.bannedUntil && new Date(user.bannedUntil).getTime() > Date.now() && (
+            <small>Currently banned until {dateTime(user.bannedUntil)}</small>
+          )}
+        </div>
+        <div className="ops-form-section">
+          <div>
+            <Gauge aria-hidden="true" />
+            <span>Generation limits</span>
+          </div>
+          <div className="ops-form-grid">
+            <label>
+              <span>Requests per hour · 0 = unlimited</span>
+              <input
+                name="requestLimitPerHour"
+                type="number"
+                min={0}
+                max={10000}
+                required
+                defaultValue={user.requestLimitPerHour}
+              />
+            </label>
+            <label>
+              <span>Requests per day · 0 = unlimited</span>
+              <input
+                name="requestLimitPerDay"
+                type="number"
+                min={0}
+                max={100000}
+                required
+                defaultValue={user.requestLimitPerDay}
+              />
+            </label>
+            <label>
+              <span>Maximum images per request</span>
+              <input
+                name="maxVariantsPerRequest"
+                type="number"
+                min={1}
+                max={12}
+                required
+                defaultValue={user.maxVariantsPerRequest}
+              />
+            </label>
+            <label>
+              <span>Concurrent requests</span>
+              <input
+                name="maxConcurrentRequests"
+                type="number"
+                min={1}
+                max={10}
+                required
+                defaultValue={user.maxConcurrentRequests}
+              />
+            </label>
+          </div>
+          <small>
+            Current usage: {user.policyUsage.requestsThisHour} this hour,{' '}
+            {user.policyUsage.requestsToday} today, {user.policyUsage.activeRequests} active.
+          </small>
+        </div>
         <button className="ops-submit" type="submit" disabled={saving}>
           {saving ? (
             <LoaderCircle className="is-spinning" aria-hidden="true" />

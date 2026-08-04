@@ -1,28 +1,15 @@
 import { Type } from 'class-transformer';
-import {
-  IsEmail,
-  IsInt,
-  IsOptional,
-  IsString,
-  Max,
-  MaxLength,
-  Min,
-  MinLength,
-} from 'class-validator';
+import { IsISO8601, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
-export class CreateUserDto {
+export class UpdateUserAccessDto {
+  @IsOptional()
+  @IsISO8601()
+  bannedUntil?: string | null;
+
+  @IsOptional()
   @IsString()
-  @MinLength(2)
-  @MaxLength(80)
-  name!: string;
-
-  @IsEmail()
-  email!: string;
-
-  @IsString()
-  @MinLength(12)
-  @MaxLength(128)
-  password!: string;
+  @MaxLength(240)
+  banReason?: string | null;
 
   @IsOptional()
   @Type(() => Number)

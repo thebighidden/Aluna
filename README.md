@@ -12,7 +12,7 @@ product's shape, color, materials, logos, labels, and printed text. This pnpm mo
 - Node.js 22+
 - pnpm 10+
 - Docker with Compose
-- A Cloudflare account with Workers AI enabled, or an OpenAI project API key
+- A Cloudflare account with Workers AI enabled, a Google Gemini API key, or an OpenAI project API key
 
 ## Local setup
 
@@ -92,8 +92,18 @@ OPENAI_IMAGE_QUALITY=medium
 OPENAI_IMAGE_SIZE=1024x1024
 ```
 
+Google Nano Banana is available for higher-fidelity product editing:
+
+```dotenv
+GENERATION_PROVIDER=gemini
+GEMINI_API_KEY=
+GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
+GEMINI_IMAGE_OUTPUT_COST_USD=0.039
+```
+
 Use `GENERATION_PROVIDER=auto` to prefer Cloudflare when its account ID and API token are present,
-then use OpenAI when only its key is configured. Provider secrets remain server-side.
+then Google Gemini, then OpenAI. The Super Admin can switch new jobs between every configured
+provider from System health; provider secrets remain server-side.
 
 ## Studio workflow
 
@@ -124,11 +134,14 @@ none of the metrics are hardcoded. It includes:
   product-category allocation, and per-user consumption.
 - A complete, searchable generation ledger with secure source/output previews, creative settings,
   provider telemetry, duration, cost, and failure details.
-- User creation, editing, password reset, account suspension/reactivation, safe deletion, login
-  activity, and a protected Super Admin identity.
+- User creation, editing, password reset, permanent deactivation/reactivation, hour/day timed bans,
+  safe deletion, login activity, and a protected Super Admin identity.
+- Enforced per-user hourly and daily request quotas, maximum images per request, and concurrent-job
+  limits, with current allowance usage visible in the user manager.
 - Per-user requests, completed images, provider units or tokens, estimated spend, failures, and
   last activity.
 - BullMQ worker/queue health, storage mode, model defaults, and classified provider failures.
+- A persisted global model selector for Cloudflare FLUX.2, Google Nano Banana, and OpenAI.
 - Cloudflare neuron usage, estimated remaining daily demo images, provider mix, and internal
   list-price estimates.
 - Optional reconciliation with the OpenAI organization Usage and Costs APIs when
@@ -163,6 +176,7 @@ GET   /users
 POST  /users
 PATCH /users/:id
 PATCH /users/:id/status
+PATCH /users/:id/access
 DELETE /users/:id
 ```
 
@@ -171,6 +185,7 @@ The live operations endpoint requires `analytics:read`:
 ```text
 GET /admin/overview?days=7|30|90
 GET /admin/generations?take=100&skip=0&status=DONE&userId=...&search=...
+PATCH /admin/generation-provider
 
 # Public, privacy-safe page-view collector
 POST /analytics/visits
@@ -216,7 +231,9 @@ R2_BUCKET=
 
 ## Data model
 
-Prisma stores `User`, `RefreshSession`, `Generation`, `SiteVisit`, and `WaitlistSubscriber` records.
+Prisma stores `User`, `RefreshSession`, `Generation`, `PlatformSetting`, `SiteVisit`, and
+`WaitlistSubscriber` records. User records include timed-ban state and enforceable generation
+allowances. The singleton platform setting persists the Super Admin's active generation provider.
 Generation records include immutable owner snapshots, provider, status, category, scene, campaign
 brief, source/output keys, requested/completed variants, model settings, provider-specific usage
 units, detailed OpenAI token usage when applicable, estimated cost, duration, classified errors, and

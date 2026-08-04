@@ -1,5 +1,5 @@
 import { GenerationStatus, Prisma } from '@prisma/client';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -23,9 +23,11 @@ const DEFAULT_CLOUDFLARE_INPUT_COST_PER_MP_USD = 0.002;
 const DEFAULT_CLOUDFLARE_OUTPUT_NEURONS = 1363.64;
 const DEFAULT_CLOUDFLARE_INPUT_NEURONS_PER_MP = 181.82;
 const CLOUDFLARE_MAX_REFERENCE_EDGE = 511;
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-image';
+const DEFAULT_GEMINI_IMAGE_OUTPUT_COST_USD = 0.039;
 
 type ImageQuality = 'low' | 'medium' | 'high' | 'auto';
-export type GenerationProvider = 'cloudflare' | 'openai';
+export type GenerationProvider = 'cloudflare' | 'gemini' | 'openai';
 
 export interface GenerationRuntimeConfiguration {
   provider: GenerationProvider;
@@ -96,6 +98,25 @@ interface CloudflareApiResponse {
   messages?: Array<{ code?: number; message?: string }>;
 }
 
+interface GeminiApiResponse {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        inlineData?: { data?: string; mimeType?: string };
+        inline_data?: { data?: string; mime_type?: string };
+        text?: string;
+      }>;
+    };
+    finishReason?: string;
+  }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
+  };
+  error?: { code?: number; message?: string; status?: string };
+}
+
 interface ProviderErrorMetadata {
   status?: number;
   providerCode?: number;
@@ -104,9 +125,9 @@ interface ProviderErrorMetadata {
 }
 
 @Injectable()
-export class GenerationService {
+export class GenerationService implements OnModuleInit {
   private readonly logger = new Logger(GenerationService.name);
-  private readonly provider: GenerationProvider;
+  private readonly defaultProvider: GenerationProvider;
   private readonly openAi?: OpenAI;
   private readonly openAiModel: string;
   private readonly openAiQuality: ImageQuality;
@@ -118,6 +139,9 @@ export class GenerationService {
   private readonly cloudflareWidth: number;
   private readonly cloudflareHeight: number;
   private readonly cloudflareDailyNeuronBudget: number;
+  private readonly geminiApiKey?: string;
+  private readonly geminiModel: string;
+  private readonly geminiImageOutputCostUsd: number;
 
   constructor(
     @Inject(ConfigService) private readonly config: ConfigService,
@@ -146,9 +170,17 @@ export class GenerationService {
     this.cloudflareHeight = this.config.get<number>('CLOUDFLARE_AI_HEIGHT') ?? 1024;
     this.cloudflareDailyNeuronBudget =
       this.config.get<number>('CLOUDFLARE_AI_DAILY_NEURON_BUDGET') ?? 10_000;
-    this.provider = this.resolveProvider();
+    this.geminiApiKey = this.config.get<string>('GEMINI_API_KEY')?.trim() || undefined;
+    this.geminiModel =
+      this.config.get<string>('GEMINI_IMAGE_MODEL')?.trim() || DEFAULT_GEMINI_MODEL;
+    this.geminiImageOutputCostUsd =
+      this.config.get<number>('GEMINI_IMAGE_OUTPUT_COST_USD') ??
+      DEFAULT_GEMINI_IMAGE_OUTPUT_COST_USD;
+    this.defaultProvider = this.resolveDefaultProvider();
+  }
 
-    const runtime = this.getRuntimeConfiguration();
+  async onModuleInit(): Promise<void> {
+    const runtime = await this.getRuntimeConfiguration();
     if (runtime.configured) {
       this.logger.log(`Image provider: ${runtime.providerLabel} (${runtime.model})`);
     } else {
@@ -158,8 +190,35 @@ export class GenerationService {
     }
   }
 
-  getRuntimeConfiguration(): GenerationRuntimeConfiguration {
-    if (this.provider === 'cloudflare') {
+  async getRuntimeConfiguration(): Promise<GenerationRuntimeConfiguration> {
+    const setting = await this.prisma.platformSetting.findUnique({ where: { id: 'main' } });
+    const provider = this.isGenerationProvider(setting?.generationProvider)
+      ? setting.generationProvider
+      : this.defaultProvider;
+    return this.runtimeForProvider(provider);
+  }
+
+  getProviderConfigurations(): GenerationRuntimeConfiguration[] {
+    return (['cloudflare', 'gemini', 'openai'] as const).map((provider) =>
+      this.runtimeForProvider(provider),
+    );
+  }
+
+  async setGenerationProvider(
+    provider: GenerationProvider,
+  ): Promise<GenerationRuntimeConfiguration> {
+    const runtime = this.runtimeForProvider(provider);
+    await this.prisma.platformSetting.upsert({
+      where: { id: 'main' },
+      create: { id: 'main', generationProvider: provider },
+      update: { generationProvider: provider },
+    });
+    this.logger.log(`Generation provider changed to ${runtime.providerLabel} (${runtime.model})`);
+    return runtime;
+  }
+
+  private runtimeForProvider(provider: GenerationProvider): GenerationRuntimeConfiguration {
+    if (provider === 'cloudflare') {
       const missingConfiguration = [
         !this.cloudflareAccountId ? 'CLOUDFLARE_ACCOUNT_ID' : null,
         !this.cloudflareApiToken ? 'CLOUDFLARE_API_TOKEN' : null,
@@ -175,6 +234,22 @@ export class GenerationService {
         usageUnit: 'neurons',
         dailyFreeUnits: this.cloudflareDailyNeuronBudget,
         estimatedUnitsPerImage: this.estimateCloudflareUsageUnits(0.25),
+      };
+    }
+
+    if (provider === 'gemini') {
+      const missingConfiguration = this.geminiApiKey ? [] : ['GEMINI_API_KEY'];
+      return {
+        provider: 'gemini',
+        providerLabel: 'Google Nano Banana',
+        model: this.geminiModel,
+        quality: 'High-fidelity image editing',
+        imageSize: 'Matches source aspect ratio',
+        configured: missingConfiguration.length === 0,
+        missingConfiguration,
+        usageUnit: 'tokens',
+        dailyFreeUnits: null,
+        estimatedUnitsPerImage: null,
       };
     }
 
@@ -198,6 +273,9 @@ export class GenerationService {
     context: GenerationContext = {},
   ): Promise<GenerationResult> {
     this.validateInput(input);
+    const runtime = context.runId
+      ? await this.runtimeForGeneration(context.runId)
+      : await this.getRuntimeConfiguration();
 
     const detectedMimeType = lookup(input.imagePath) || 'image/jpeg';
     if (!detectedMimeType.startsWith('image/')) {
@@ -207,27 +285,35 @@ export class GenerationService {
     const startedAt = Date.now();
     const timestamp = this.outputTimestamp();
     const outputPrefix = context.outputPrefix ?? timestamp;
-    const runId = await this.prepareRun(input, context.inputKey ?? input.imagePath, context.runId);
+    const runId = await this.prepareRun(
+      input,
+      context.inputKey ?? input.imagePath,
+      runtime,
+      context.runId,
+    );
     const basePrompt = this.composeGenerationPrompt(input);
     const results: VariantResult[] = [];
 
     try {
       const sourceImage = await readFile(input.imagePath);
-      const source = await this.prepareSource(sourceImage, detectedMimeType);
-      this.assertProviderConfigured();
+      const source = await this.prepareSource(sourceImage, detectedMimeType, runtime.provider);
+      this.assertProviderConfigured(runtime);
       for (let index = 1; index <= input.variants; index += 1) {
-        if (this.provider === 'cloudflare') {
+        if (runtime.provider === 'cloudflare') {
           await this.assertCloudflareDailyBudget(runId, source.megapixels);
         }
-        const variant = await this.generateVariant({
-          source,
-          prompt: this.variantPrompt(basePrompt, input, runId, index, input.variants),
-          safetyRetryPrompt: this.cloudflareSafetyRetryPrompt(input, index, input.variants),
-          index,
-          outputPrefix,
-          seed: this.variantSeed(runId, index),
-          runId,
-        });
+        const variant = await this.generateVariant(
+          {
+            source,
+            prompt: this.variantPrompt(basePrompt, input, runId, index, input.variants),
+            safetyRetryPrompt: this.cloudflareSafetyRetryPrompt(input, index, input.variants),
+            index,
+            outputPrefix,
+            seed: this.variantSeed(runId, index),
+            runId,
+          },
+          runtime,
+        );
         results.push(variant);
 
         const cumulativeCost = results.reduce((sum, result) => sum + result.costUsd, 0);
@@ -296,18 +382,21 @@ export class GenerationService {
     }
   }
 
-  private async generateVariant(args: {
-    source: PreparedSource;
-    prompt: string;
-    safetyRetryPrompt: string;
-    index: number;
-    outputPrefix: string;
-    seed: number;
-    runId: string;
-  }): Promise<VariantResult> {
-    return this.provider === 'cloudflare'
-      ? this.generateCloudflareVariant(args)
-      : this.generateOpenAiVariant(args);
+  private async generateVariant(
+    args: {
+      source: PreparedSource;
+      prompt: string;
+      safetyRetryPrompt: string;
+      index: number;
+      outputPrefix: string;
+      seed: number;
+      runId: string;
+    },
+    runtime: GenerationRuntimeConfiguration,
+  ): Promise<VariantResult> {
+    if (runtime.provider === 'cloudflare') return this.generateCloudflareVariant(args);
+    if (runtime.provider === 'gemini') return this.generateGeminiVariant(args);
+    return this.generateOpenAiVariant(args);
   }
 
   private async generateCloudflareVariant(args: {
@@ -440,6 +529,97 @@ export class GenerationService {
     return Buffer.from(encodedImage.replace(/^data:image\/[^;]+;base64,/, ''), 'base64');
   }
 
+  private async generateGeminiVariant(args: {
+    source: PreparedSource;
+    prompt: string;
+    index: number;
+    outputPrefix: string;
+  }): Promise<VariantResult> {
+    if (!this.geminiApiKey) throw new Error('GEMINI_API_KEY is missing from apps/api/.env');
+    const startedAt = Date.now();
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.geminiModel)}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.geminiApiKey,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: args.prompt },
+                {
+                  inline_data: {
+                    mime_type: args.source.mimeType,
+                    data: args.source.image.toString('base64'),
+                  },
+                },
+              ],
+            },
+          ],
+          generationConfig: { responseModalities: ['IMAGE'] },
+        }),
+      },
+    );
+    const payload = (await response.json().catch(() => ({}))) as GeminiApiResponse;
+    if (!response.ok || payload.error) {
+      throw this.providerError(
+        payload.error?.message || `Google Gemini returned HTTP ${response.status}`,
+        response.status,
+        payload.error?.code,
+      );
+    }
+
+    const parts = payload.candidates?.flatMap((candidate) => candidate.content?.parts ?? []) ?? [];
+    const imagePart = parts.find((part) => part.inlineData?.data || part.inline_data?.data);
+    const encodedImage = imagePart?.inlineData?.data ?? imagePart?.inline_data?.data;
+    if (!encodedImage) {
+      const reason = payload.candidates?.[0]?.finishReason;
+      throw this.providerError(
+        `Google Gemini returned no image${reason ? ` (${reason})` : ''}`,
+        502,
+      );
+    }
+
+    const outputMimeType =
+      imagePart?.inlineData?.mimeType ?? imagePart?.inline_data?.mime_type ?? 'image/png';
+    const extension = this.extensionForMime(outputMimeType);
+    const key = await this.storage.putOutput(
+      args.outputPrefix,
+      `variant-${String(args.index).padStart(2, '0')}${extension}`,
+      Buffer.from(encodedImage, 'base64'),
+      outputMimeType,
+    );
+    const durationMs = Date.now() - startedAt;
+    const inputTokens = payload.usageMetadata?.promptTokenCount ?? 0;
+    const outputTokens = payload.usageMetadata?.candidatesTokenCount ?? 0;
+    const totalTokens = payload.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens;
+    const usage: ProviderUsage = {
+      inputTokens,
+      inputTextTokens: 0,
+      inputImageTokens: 0,
+      outputTokens,
+      totalTokens,
+      providerUnits: totalTokens,
+      providerUnit: 'tokens',
+    };
+
+    this.logger.log(
+      `Gemini variant ${args.index}: ${durationMs} ms, ${totalTokens} tokens, estimated $${this.geminiImageOutputCostUsd.toFixed(6)}, output ${key}`,
+    );
+    return {
+      index: args.index,
+      key,
+      costUsd: this.geminiImageOutputCostUsd,
+      durationMs,
+      mimeType: outputMimeType,
+      usage,
+    };
+  }
+
   private async generateOpenAiVariant(args: {
     source: PreparedSource;
     prompt: string;
@@ -496,8 +676,12 @@ export class GenerationService {
     };
   }
 
-  private async prepareSource(image: Buffer, mimeType: string): Promise<PreparedSource> {
-    if (this.provider !== 'cloudflare') {
+  private async prepareSource(
+    image: Buffer,
+    mimeType: string,
+    provider: GenerationProvider,
+  ): Promise<PreparedSource> {
+    if (provider !== 'cloudflare') {
       const metadata = await sharp(image).metadata();
       return {
         image,
@@ -526,9 +710,9 @@ export class GenerationService {
   private async prepareRun(
     input: GenerateImagesInput,
     inputKey: string,
+    runtime: GenerationRuntimeConfiguration,
     existingRunId?: string,
   ): Promise<string> {
-    const runtime = this.getRuntimeConfiguration();
     const data = {
       status: GenerationStatus.GENERATING,
       provider: runtime.provider,
@@ -563,6 +747,20 @@ export class GenerationService {
     return run.id;
   }
 
+  private async runtimeForGeneration(runId: string): Promise<GenerationRuntimeConfiguration> {
+    const generation = await this.prisma.generation.findUnique({
+      where: { id: runId },
+      select: { provider: true, model: true },
+    });
+    if (!generation || !this.isGenerationProvider(generation.provider)) {
+      return this.getRuntimeConfiguration();
+    }
+    return {
+      ...this.runtimeForProvider(generation.provider),
+      model: generation.model,
+    };
+  }
+
   private async assertCloudflareDailyBudget(
     runId: string,
     inputMegapixels: number,
@@ -593,21 +791,27 @@ export class GenerationService {
     }
   }
 
-  private assertProviderConfigured(): void {
-    const runtime = this.getRuntimeConfiguration();
+  private assertProviderConfigured(runtime: GenerationRuntimeConfiguration): void {
     if (runtime.configured) return;
     throw new Error(
       `${runtime.providerLabel} is not configured. Add ${runtime.missingConfiguration.join(' and ')} to apps/api/.env.`,
     );
   }
 
-  private resolveProvider(): GenerationProvider {
+  private resolveDefaultProvider(): GenerationProvider {
     const requested = this.config.get<string>('GENERATION_PROVIDER')?.trim().toLowerCase();
     if (requested === 'openai') return 'openai';
+    if (requested === 'gemini') return 'gemini';
     if (requested === 'auto') {
-      return this.cloudflareAccountId && this.cloudflareApiToken ? 'cloudflare' : 'openai';
+      if (this.cloudflareAccountId && this.cloudflareApiToken) return 'cloudflare';
+      if (this.geminiApiKey) return 'gemini';
+      return 'openai';
     }
     return 'cloudflare';
+  }
+
+  private isGenerationProvider(value: string | undefined): value is GenerationProvider {
+    return value === 'cloudflare' || value === 'gemini' || value === 'openai';
   }
 
   private validateInput(input: GenerateImagesInput): void {

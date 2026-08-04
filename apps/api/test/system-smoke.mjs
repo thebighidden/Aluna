@@ -133,7 +133,8 @@ try {
   result = await json('/generations/configuration', authorized(adminToken));
   runtimeConfig = result.body;
   check(
-    result.response.status === 200 && ['cloudflare', 'openai'].includes(runtimeConfig.provider),
+    result.response.status === 200 &&
+      ['cloudflare', 'gemini', 'openai'].includes(runtimeConfig.provider),
     'generation provider configuration is exposed without secrets',
   );
   check(
@@ -145,6 +146,24 @@ try {
   check(
     result.response.status === 200 && result.body.summary && result.body.queue,
     'admin overview returns live analytics and queue health',
+  );
+  check(
+    result.body.configuration.availableProviders.length === 3 &&
+      result.body.configuration.availableProviders.some(
+        (provider) => provider.provider === 'gemini' && provider.model === 'gemini-2.5-flash-image',
+      ),
+    'admin overview exposes configured model choices without provider secrets',
+  );
+  result = await json(
+    '/admin/generation-provider',
+    authorized(adminToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ provider: runtimeConfig.provider }),
+    }),
+  );
+  check(
+    result.response.status === 200 && result.body.provider === runtimeConfig.provider,
+    'Super Admin can persist the active generation model',
   );
 
   result = await json('/admin/overview?days=13', authorized(adminToken));
@@ -206,6 +225,24 @@ try {
       ),
     'user list includes login activity and management metadata',
   );
+  result = await json(
+    `/users/${userOne.id}/access`,
+    authorized(adminToken, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        requestLimitPerHour: 5,
+        requestLimitPerDay: 20,
+        maxVariantsPerRequest: 2,
+        maxConcurrentRequests: 1,
+      }),
+    }),
+  );
+  check(
+    result.response.status === 200 &&
+      result.body.requestLimitPerHour === 5 &&
+      result.body.maxVariantsPerRequest === 2,
+    'Super Admin can configure enforceable user request and image limits',
+  );
 
   result = await json(
     '/users',
@@ -258,6 +295,14 @@ try {
 
   result = await json('/admin/overview?days=7', authorized(userOneToken));
   check(result.response.status === 403, 'normal user cannot access Super Admin analytics');
+  result = await json(
+    '/admin/generation-provider',
+    authorized(userOneToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ provider: 'cloudflare' }),
+    }),
+  );
+  check(result.response.status === 403, 'normal user cannot change the global generation model');
   result = await json('/admin/overview?days=7', authorized(adminToken));
   check(result.response.status === 200, 'Super Admin can access analytics');
 
@@ -325,7 +370,7 @@ try {
   );
   check(result.response.status === 200 && !result.body.isActive, 'Super Admin can suspend a user');
   result = await login(emails.userTwo);
-  check(result.response.status === 401, 'suspended user cannot authenticate');
+  check(result.response.status === 403, 'deactivated user cannot authenticate');
   result = await json(
     `/users/${userTwo.id}/status`,
     authorized(adminToken, {
@@ -334,8 +379,39 @@ try {
     }),
   );
   check(result.response.status === 200 && result.body.isActive, 'Super Admin can restore a user');
-  const restoredUserTwoLogin = await login(emails.userTwo);
+  let restoredUserTwoLogin = await login(emails.userTwo);
   check(restoredUserTwoLogin.response.status === 200, 'restored user can authenticate again');
+  result = await json(
+    `/users/${userTwo.id}/access`,
+    authorized(adminToken, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        bannedUntil: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+        banReason: 'Automated policy test',
+      }),
+    }),
+  );
+  check(
+    result.response.status === 200 && result.body.bannedUntil,
+    'Super Admin can apply an hourly ban',
+  );
+  result = await json('/auth/me', authorized(restoredUserTwoLogin.body.accessToken));
+  check(result.response.status === 403, 'a timed ban immediately blocks the existing session');
+  result = await login(emails.userTwo);
+  check(result.response.status === 403, 'a timed ban blocks new logins');
+  result = await json(
+    `/users/${userTwo.id}/access`,
+    authorized(adminToken, {
+      method: 'PATCH',
+      body: JSON.stringify({ bannedUntil: null, banReason: null }),
+    }),
+  );
+  check(
+    result.response.status === 200 && !result.body.bannedUntil,
+    'Super Admin can clear a timed ban',
+  );
+  restoredUserTwoLogin = await login(emails.userTwo);
+  check(restoredUserTwoLogin.response.status === 200, 'unbanned user can authenticate again');
 
   // Deliberately malformed image bytes exercise the complete queue failure path without
   // consuming provider credits during routine verification.

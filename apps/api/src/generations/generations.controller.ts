@@ -4,6 +4,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpException,
+  HttpStatus,
   MessageEvent,
   NotFoundException,
   Param,
@@ -57,7 +59,7 @@ export class GenerationsController {
 
   @Get('configuration')
   @Permissions(Permission.PresetRead)
-  configuration() {
+  async configuration() {
     return this.generationService.getRuntimeConfiguration();
   }
 
@@ -107,6 +109,7 @@ export class GenerationsController {
         `Scene "${dto.sceneId}" is not valid for category "${dto.category}"`,
       );
     }
+    await this.enforceGenerationPolicy(request.user.id, dto.variants);
 
     let creativeOptions: Record<string, string>;
     try {
@@ -116,7 +119,7 @@ export class GenerationsController {
     }
 
     const generationId = randomUUID();
-    const runtime = this.generationService.getRuntimeConfiguration();
+    const runtime = await this.generationService.getRuntimeConfiguration();
     const inputKey = await this.storage.putInput(
       generationId,
       file.originalname,
@@ -240,6 +243,75 @@ export class GenerationsController {
     });
     if (!generation) throw new NotFoundException(`Generation "${id}" was not found`);
     return generation;
+  }
+
+  private async enforceGenerationPolicy(userId: string, variants: number): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        bannedUntil: true,
+        requestLimitPerHour: true,
+        requestLimitPerDay: true,
+        maxVariantsPerRequest: true,
+        maxConcurrentRequests: true,
+      },
+    });
+    if (!user) throw new NotFoundException('The current user account no longer exists');
+    if (user.bannedUntil && user.bannedUntil.getTime() > Date.now()) {
+      throw new HttpException(
+        `This account is banned until ${user.bannedUntil.toISOString()}`,
+        HttpStatus.FORBIDDEN,
+      );
+    }
+    if (variants > user.maxVariantsPerRequest) {
+      throw new BadRequestException(
+        `Your account allows at most ${user.maxVariantsPerRequest} images per request`,
+      );
+    }
+
+    const now = new Date();
+    const hourAgo = new Date(now.getTime() - 60 * 60 * 1_000);
+    const today = new Date(now);
+    today.setUTCHours(0, 0, 0, 0);
+    const [hourlyRequests, dailyRequests, activeRequests] = await Promise.all([
+      user.requestLimitPerHour > 0
+        ? this.prisma.generation.count({
+            where: { userId, createdAt: { gte: hourAgo } },
+          })
+        : Promise.resolve(0),
+      user.requestLimitPerDay > 0
+        ? this.prisma.generation.count({
+            where: { userId, createdAt: { gte: today } },
+          })
+        : Promise.resolve(0),
+      this.prisma.generation.count({
+        where: {
+          userId,
+          status: {
+            in: [GenerationStatus.QUEUED, GenerationStatus.ANALYZING, GenerationStatus.GENERATING],
+          },
+        },
+      }),
+    ]);
+
+    if (user.requestLimitPerHour > 0 && hourlyRequests >= user.requestLimitPerHour) {
+      throw new HttpException(
+        `Hourly request limit reached (${user.requestLimitPerHour}). Try again later.`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    if (user.requestLimitPerDay > 0 && dailyRequests >= user.requestLimitPerDay) {
+      throw new HttpException(
+        `Daily request limit reached (${user.requestLimitPerDay}). It resets at 00:00 UTC.`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    if (activeRequests >= user.maxConcurrentRequests) {
+      throw new HttpException(
+        `Concurrent request limit reached (${user.maxConcurrentRequests}). Wait for an active generation to finish.`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
   }
 
   private serializeGeneration(generation: Generation) {

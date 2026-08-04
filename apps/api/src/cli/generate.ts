@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   });
   try {
     const service = app.get(GenerationService);
-    const runtime = service.getRuntimeConfiguration();
+    const runtime = await service.getRuntimeConfiguration();
     if (!runtime.configured) {
       throw new Error(
         `${runtime.providerLabel} is not configured; add ${runtime.missingConfiguration.join(' and ')} to apps/api/.env`,

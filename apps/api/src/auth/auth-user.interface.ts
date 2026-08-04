@@ -8,6 +8,10 @@ export interface AuthUser {
   name: string;
   role: Role;
   permissions: Permission[];
+  requestLimitPerHour: number;
+  requestLimitPerDay: number;
+  maxVariantsPerRequest: number;
+  maxConcurrentRequests: number;
 }
 
 export interface RequestWithUser extends Request {

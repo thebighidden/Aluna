@@ -5,34 +5,77 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { GenerationStatus, Role } from '@prisma/client';
 import { hash } from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { ROLE_PERMISSIONS } from '../auth/auth.constants';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UpdateUserAccessDto } from './dto/update-user-access.dto';
 
 @Injectable()
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list() {
-    const users = await this.prisma.user.findMany({
-      orderBy: [{ role: 'asc' }, { createdAt: 'asc' }],
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        isActive: true,
-        lastLoginAt: true,
-        loginCount: true,
-        createdAt: true,
-        updatedAt: true,
-        _count: { select: { generations: true } },
+    const now = new Date();
+    const hourAgo = new Date(now.getTime() - 60 * 60 * 1_000);
+    const today = new Date(now);
+    today.setUTCHours(0, 0, 0, 0);
+    const activeStatuses = [
+      GenerationStatus.QUEUED,
+      GenerationStatus.ANALYZING,
+      GenerationStatus.GENERATING,
+    ];
+    const [users, hourlyUsage, dailyUsage, activeUsage] = await Promise.all([
+      this.prisma.user.findMany({
+        orderBy: [{ role: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          isActive: true,
+          bannedUntil: true,
+          banReason: true,
+          requestLimitPerHour: true,
+          requestLimitPerDay: true,
+          maxVariantsPerRequest: true,
+          maxConcurrentRequests: true,
+          lastLoginAt: true,
+          loginCount: true,
+          createdAt: true,
+          updatedAt: true,
+          _count: { select: { generations: true } },
+        },
+      }),
+      this.prisma.generation.groupBy({
+        by: ['userId'],
+        where: { userId: { not: null }, createdAt: { gte: hourAgo } },
+        _count: { _all: true },
+      }),
+      this.prisma.generation.groupBy({
+        by: ['userId'],
+        where: { userId: { not: null }, createdAt: { gte: today } },
+        _count: { _all: true },
+      }),
+      this.prisma.generation.groupBy({
+        by: ['userId'],
+        where: { userId: { not: null }, status: { in: activeStatuses } },
+        _count: { _all: true },
+      }),
+    ]);
+    const usageCount = (rows: typeof hourlyUsage, userId: string) =>
+      rows.find((row) => row.userId === userId)?._count._all ?? 0;
+    return users.map((user) => ({
+      ...user,
+      permissions: ROLE_PERMISSIONS[user.role],
+      policyUsage: {
+        requestsThisHour: usageCount(hourlyUsage, user.id),
+        requestsToday: usageCount(dailyUsage, user.id),
+        activeRequests: usageCount(activeUsage, user.id),
       },
-    });
-    return users.map((user) => ({ ...user, permissions: ROLE_PERMISSIONS[user.role] }));
+    }));
   }
 
   async create(dto: CreateUserDto) {
@@ -45,6 +88,10 @@ export class UsersService {
         email,
         passwordHash: await hash(dto.password, 12),
         role: Role.USER,
+        requestLimitPerHour: dto.requestLimitPerHour,
+        requestLimitPerDay: dto.requestLimitPerDay,
+        maxVariantsPerRequest: dto.maxVariantsPerRequest,
+        maxConcurrentRequests: dto.maxConcurrentRequests,
       },
       select: {
         id: true,
@@ -52,6 +99,12 @@ export class UsersService {
         name: true,
         role: true,
         isActive: true,
+        bannedUntil: true,
+        banReason: true,
+        requestLimitPerHour: true,
+        requestLimitPerDay: true,
+        maxVariantsPerRequest: true,
+        maxConcurrentRequests: true,
         createdAt: true,
         _count: { select: { generations: true } },
       },
@@ -126,6 +179,64 @@ export class UsersService {
         });
       }
       return { ...updated, permissions: ROLE_PERMISSIONS[updated.role] };
+    });
+  }
+
+  async updateAccess(id: string, dto: UpdateUserAccessDto) {
+    const user = await this.getUser(id);
+    if (user.role === Role.SUPER_ADMIN) {
+      throw new ForbiddenException('The Super Admin account is protected');
+    }
+    if (!Object.values(dto).some((value) => value !== undefined)) {
+      throw new BadRequestException('Provide at least one access-control setting');
+    }
+
+    const bannedUntil = dto.bannedUntil ? new Date(dto.bannedUntil) : null;
+    if (bannedUntil && bannedUntil.getTime() <= Date.now()) {
+      throw new BadRequestException('A timed ban must end in the future');
+    }
+    const shouldRevokeSessions = Boolean(bannedUntil);
+
+    return this.prisma.$transaction(async (transaction) => {
+      const updated = await transaction.user.update({
+        where: { id },
+        data: {
+          ...(dto.bannedUntil !== undefined ? { bannedUntil } : {}),
+          ...(dto.banReason !== undefined ? { banReason: dto.banReason?.trim() || null } : {}),
+          ...(dto.requestLimitPerHour !== undefined
+            ? { requestLimitPerHour: dto.requestLimitPerHour }
+            : {}),
+          ...(dto.requestLimitPerDay !== undefined
+            ? { requestLimitPerDay: dto.requestLimitPerDay }
+            : {}),
+          ...(dto.maxVariantsPerRequest !== undefined
+            ? { maxVariantsPerRequest: dto.maxVariantsPerRequest }
+            : {}),
+          ...(dto.maxConcurrentRequests !== undefined
+            ? { maxConcurrentRequests: dto.maxConcurrentRequests }
+            : {}),
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          isActive: true,
+          bannedUntil: true,
+          banReason: true,
+          requestLimitPerHour: true,
+          requestLimitPerDay: true,
+          maxVariantsPerRequest: true,
+          maxConcurrentRequests: true,
+        },
+      });
+      if (shouldRevokeSessions) {
+        await transaction.refreshSession.updateMany({
+          where: { userId: id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+      return updated;
     });
   }
 

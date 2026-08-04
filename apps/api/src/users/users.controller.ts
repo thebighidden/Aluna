@@ -12,6 +12,7 @@ import {
 import { Permission } from '../auth/auth.constants';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserAccessDto } from './dto/update-user-access.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UsersService } from './users.service';
@@ -36,6 +37,12 @@ export class UsersController {
   @Permissions(Permission.UsersManage)
   updateStatus(@Param('id') id: string, @Body() dto: UpdateUserStatusDto) {
     return this.users.updateStatus(id, dto.isActive);
+  }
+
+  @Patch(':id/access')
+  @Permissions(Permission.UsersManage)
+  updateAccess(@Param('id') id: string, @Body() dto: UpdateUserAccessDto) {
+    return this.users.updateAccess(id, dto);
   }
 
   @Patch(':id')
