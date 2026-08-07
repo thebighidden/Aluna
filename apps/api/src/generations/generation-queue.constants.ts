@@ -8,5 +8,7 @@ export interface GenerationJobData {
   sceneId: string;
   variants: number;
   brief?: string;
+  productType?: string;
   options: Record<string, string>;
+  creativePlan: import('../creative-director/creative-director.types').CreativePlan;
 }

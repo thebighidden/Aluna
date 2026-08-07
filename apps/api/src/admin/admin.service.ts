@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GenerationStatus, Prisma } from '@prisma/client';
 import { Queue } from 'bullmq';
@@ -7,6 +7,21 @@ import { GenerationService, GenerationProvider } from '../generation/generation.
 import { PrismaService } from '../prisma/prisma.service';
 import { GENERATION_QUEUE, GenerationJobData } from '../generations/generation-queue.constants';
 import { AdminGenerationQueryDto } from './dto/admin-generation-query.dto';
+import { AdminWaitlistQueryDto } from './dto/admin-waitlist-query.dto';
+import { UpdateProviderCredentialsDto } from './dto/update-provider-credentials.dto';
+import { UpdateWaitlistSubscriberDto } from './dto/update-waitlist-subscriber.dto';
+import {
+  NotificationChannel,
+  NotificationsService,
+} from '../messaging/notifications.service';
+import { EmailService } from '../messaging/email.service';
+import { SupportService } from '../support/support.service';
+import {
+  findWaitlistTemplate,
+  renderWaitlistTemplate,
+  WAITLIST_TEMPLATES,
+  whatsappLink,
+} from './waitlist-templates.config';
 
 type DailyMetric = {
   date: string;
@@ -24,7 +39,190 @@ export class AdminService {
     @Inject(ConfigService) private readonly config: ConfigService,
     @InjectQueue(GENERATION_QUEUE) private readonly queue: Queue<GenerationJobData>,
     @Inject(GenerationService) private readonly generationService: GenerationService,
+    @Inject(NotificationsService) private readonly notifications: NotificationsService,
+    @Inject(SupportService) private readonly support: SupportService,
+    @Inject(EmailService) private readonly email: EmailService,
   ) {}
+
+  publicAppUrl(): string {
+    return (
+      this.config.get<string>('PUBLIC_APP_URL')?.trim().replace(/\/$/, '') ||
+      'https://aluna.studio'
+    );
+  }
+
+  broadcast(input: {
+    userIds: string[];
+    title: string;
+    body: string;
+    channel: NotificationChannel;
+  }) {
+    return this.notifications.broadcast(input);
+  }
+
+  supportTickets(status?: string) {
+    return this.support.listAll(status);
+  }
+
+  replyToTicket(input: { ticketId: string; adminId: string; adminName: string; body: string }) {
+    return this.support.reply({
+      ticketId: input.ticketId,
+      authorId: input.adminId,
+      authorName: input.adminName,
+      body: input.body,
+      fromAdmin: true,
+    });
+  }
+
+  setTicketStatus(ticketId: string, status: string) {
+    return this.support.setStatus(ticketId, status);
+  }
+
+  waitlistTemplates() {
+    return {
+      emailConfigured: this.email.configured,
+      templates: WAITLIST_TEMPLATES.map(({ id, label, description }) => ({
+        id,
+        label,
+        description,
+      })),
+    };
+  }
+
+  /**
+   * Renders a template into a wa.me deep link and records the outreach. Nothing is actually sent
+   * here — the admin sends from their own WhatsApp — so the log records intent, not delivery.
+   */
+  async composeWaitlistMessage(input: {
+    subscriberId: string;
+    templateId: string;
+    sentByName: string;
+    appUrl: string;
+  }) {
+    const subscriber = await this.prisma.waitlistSubscriber.findUnique({
+      where: { id: input.subscriberId },
+    });
+    if (!subscriber) throw new NotFoundException('Waitlist subscriber not found');
+    if (!subscriber.phone) {
+      throw new NotFoundException('This subscriber has no phone number for WhatsApp');
+    }
+    const template = findWaitlistTemplate(input.templateId);
+    if (!template) throw new NotFoundException(`Unknown template "${input.templateId}"`);
+
+    const body = renderWaitlistTemplate(template, {
+      offerCode: subscriber.offerCode,
+      link: input.appUrl,
+    });
+    const link = whatsappLink(subscriber.phone, body);
+    if (!link) {
+      throw new NotFoundException(
+        `"${subscriber.phone}" is not a usable WhatsApp number. It needs a country code.`,
+      );
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.waitlistMessage.create({
+        data: {
+          subscriberId: subscriber.id,
+          channel: 'whatsapp',
+          template: template.id,
+          body,
+          sentByName: input.sentByName,
+        },
+      }),
+      this.prisma.waitlistSubscriber.update({
+        where: { id: subscriber.id },
+        data: {
+          contactedAt: new Date(),
+          status: subscriber.status === 'new' ? 'contacted' : subscriber.status,
+        },
+      }),
+    ]);
+
+    return { link, body, template: template.id, phone: subscriber.phone };
+  }
+
+  /** Per-user spend rolled up by day, ISO week, and month. */
+  async userCostBreakdown(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, name: true, email: true, role: true, createdAt: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const runs = await this.prisma.generation.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        createdAt: true,
+        costUsd: true,
+        outputKeys: true,
+        provider: true,
+        status: true,
+      },
+    });
+
+    const buckets = {
+      daily: new Map<string, { spendUsd: number; images: number; requests: number }>(),
+      weekly: new Map<string, { spendUsd: number; images: number; requests: number }>(),
+      monthly: new Map<string, { spendUsd: number; images: number; requests: number }>(),
+    };
+    const add = (
+      map: Map<string, { spendUsd: number; images: number; requests: number }>,
+      key: string,
+      cost: number,
+      images: number,
+    ) => {
+      const current = map.get(key) ?? { spendUsd: 0, images: 0, requests: 0 };
+      current.spendUsd += cost;
+      current.images += images;
+      current.requests += 1;
+      map.set(key, current);
+    };
+
+    for (const run of runs) {
+      const cost = Number(run.costUsd);
+      const images = run.outputKeys.length;
+      add(buckets.daily, run.createdAt.toISOString().slice(0, 10), cost, images);
+      add(buckets.weekly, this.isoWeek(run.createdAt), cost, images);
+      add(buckets.monthly, run.createdAt.toISOString().slice(0, 7), cost, images);
+    }
+
+    const series = (map: Map<string, { spendUsd: number; images: number; requests: number }>) =>
+      [...map.entries()]
+        .sort(([a], [b]) => (a < b ? 1 : -1))
+        .slice(0, 12)
+        .reverse()
+        .map(([period, value]) => ({
+          period,
+          spendUsd: this.money(value.spendUsd),
+          images: value.images,
+          requests: value.requests,
+        }));
+
+    return {
+      user,
+      totals: {
+        spendUsd: this.money(runs.reduce((sum, run) => sum + Number(run.costUsd), 0)),
+        images: runs.reduce((sum, run) => sum + run.outputKeys.length, 0),
+        requests: runs.length,
+        failures: runs.filter((run) => run.status === GenerationStatus.FAILED).length,
+      },
+      daily: series(buckets.daily),
+      weekly: series(buckets.weekly),
+      monthly: series(buckets.monthly),
+    };
+  }
+
+  private isoWeek(date: Date): string {
+    const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    // ISO weeks run Monday-Sunday and belong to the year containing their Thursday.
+    const day = target.getUTCDay() || 7;
+    target.setUTCDate(target.getUTCDate() + 4 - day);
+    const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
+    const week = Math.ceil(((target.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
+    return `${target.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+  }
 
   async overview(days: number) {
     const runtime = await this.generationService.getRuntimeConfiguration();
@@ -85,10 +283,28 @@ export class AdminService {
       runtime.dailyFreeUnits === null
         ? null
         : Math.max(runtime.dailyFreeUnits - todayProviderUnits, 0);
-    const estimatedImagesRemaining =
+    const todaySpendUsd = runs
+      .filter((run) => run.createdAt >= today)
+      .reduce((sum, run) => sum + Number(run.costUsd), 0);
+    const remainingSpendUsd =
+      runtime.dailySpendLimitUsd === null
+        ? null
+        : Math.max(runtime.dailySpendLimitUsd - todaySpendUsd, 0);
+    // Whichever ceiling bites first is the one the operator actually has left.
+    const imagesFromUnits =
       remainingFreeUnits === null || !runtime.estimatedUnitsPerImage
         ? null
         : Math.floor(remainingFreeUnits / runtime.estimatedUnitsPerImage);
+    const imagesFromSpend =
+      remainingSpendUsd === null || !runtime.estimatedCostPerImageUsd
+        ? null
+        : Math.floor(remainingSpendUsd / runtime.estimatedCostPerImageUsd);
+    const estimatedImagesRemaining =
+      imagesFromUnits === null
+        ? imagesFromSpend
+        : imagesFromSpend === null
+          ? imagesFromUnits
+          : Math.min(imagesFromUnits, imagesFromSpend);
     const latestProviderFailure = activeProviderRuns.find((run) => run.error);
 
     return {
@@ -164,6 +380,11 @@ export class AdminService {
         todayProviderUnits: this.units(todayProviderUnits),
         remainingFreeUnits: remainingFreeUnits === null ? null : this.units(remainingFreeUnits),
         estimatedImagesRemaining,
+        dailySpendLimitUsd:
+          runtime.dailySpendLimitUsd === null ? null : this.money(runtime.dailySpendLimitUsd),
+        todaySpendUsd: this.money(todaySpendUsd),
+        remainingSpendUsd: remainingSpendUsd === null ? null : this.money(remainingSpendUsd),
+        estimatedCostPerImageUsd: this.money(runtime.estimatedCostPerImageUsd),
         dailyCreditValueUsd:
           runtime.dailyFreeUnits === null
             ? null
@@ -184,8 +405,86 @@ export class AdminService {
     };
   }
 
+  async setGenerationModel(provider: GenerationProvider, model: string) {
+    return this.generationService.setGenerationModel(provider, model);
+  }
+
   async setGenerationProvider(provider: GenerationProvider) {
     return this.generationService.setGenerationProvider(provider);
+  }
+
+  providerCredentials() {
+    return this.generationService.getProviderCredentialStatuses();
+  }
+
+  updateProviderCredentials(dto: UpdateProviderCredentialsDto) {
+    return this.generationService.setProviderCredentials(dto);
+  }
+
+  async waitlist(query: AdminWaitlistQueryDto) {
+    const search = query.search?.trim();
+    const where: Prisma.WaitlistSubscriberWhereInput = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(search
+        ? {
+            OR: [
+              { phone: { contains: search, mode: 'insensitive' } },
+              { email: { contains: search, mode: 'insensitive' } },
+              { source: { contains: search, mode: 'insensitive' } },
+              { notes: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+    const [total, items, statusGroups] = await Promise.all([
+      this.prisma.waitlistSubscriber.count({ where }),
+      this.prisma.waitlistSubscriber.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+      }),
+      this.prisma.waitlistSubscriber.groupBy({
+        by: ['status'],
+        _count: { _all: true },
+      }),
+    ]);
+    return {
+      total,
+      skip: query.skip,
+      take: query.take,
+      counts: Object.fromEntries(statusGroups.map((group) => [group.status, group._count._all])),
+      items,
+    };
+  }
+
+  async updateWaitlistSubscriber(id: string, dto: UpdateWaitlistSubscriberDto) {
+    const existing = await this.prisma.waitlistSubscriber.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Waitlist subscriber was not found');
+    return this.prisma.waitlistSubscriber.update({
+      where: { id },
+      data: {
+        ...(dto.status !== undefined
+          ? {
+              status: dto.status,
+              contactedAt:
+                dto.status === 'contacted' || dto.status === 'invited'
+                  ? (existing.contactedAt ?? new Date())
+                  : existing.contactedAt,
+            }
+          : {}),
+        ...(dto.notes !== undefined ? { notes: dto.notes.trim() || null } : {}),
+      },
+    });
+  }
+
+  async removeWaitlistSubscriber(id: string): Promise<void> {
+    const existing = await this.prisma.waitlistSubscriber.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Waitlist subscriber was not found');
+    await this.prisma.waitlistSubscriber.delete({ where: { id } });
   }
 
   async generations(query: AdminGenerationQueryDto) {

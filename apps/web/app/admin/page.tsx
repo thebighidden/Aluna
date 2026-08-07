@@ -3,6 +3,8 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowDownAZ,
+  ArrowUpDown,
   BarChart3,
   Ban,
   CheckCircle2,
@@ -12,6 +14,7 @@ import {
   Cpu,
   Gauge,
   Image as ImageIcon,
+  KeyRound,
   LayoutDashboard,
   LoaderCircle,
   LogOut,
@@ -19,19 +22,24 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   Server,
   ShieldCheck,
   Sparkles,
   Trash2,
   UserRoundCog,
+  UserCheck,
+  UserX,
   Users,
+  ListChecks,
   X,
   type LucideIcon,
 } from 'lucide-react';
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { AdminGate } from './admin-gate';
+import { ConfirmDialog } from '../components/confirm-dialog';
 import {
   apiErrorMessage,
   authFetch,
@@ -40,7 +48,8 @@ import {
   type StudioUser,
 } from '../lib/auth-client';
 
-type Section = 'overview' | 'traffic' | 'usage' | 'generations' | 'users' | 'system';
+import { adminSections, type AdminSection } from './sections';
+
 type Range = 7 | 30 | 90;
 
 type AdminOverview = {
@@ -135,6 +144,10 @@ type AdminOverview = {
     estimatedImagesRemaining: number | null;
     dailyCreditValueUsd: number | null;
     remainingCreditValueUsd: number | null;
+    dailySpendLimitUsd: number | null;
+    todaySpendUsd: number;
+    remainingSpendUsd: number | null;
+    estimatedCostPerImageUsd: number;
     latestProviderError: string | null;
     latestProviderErrorCode: string | null;
     availableProviders: Array<{
@@ -146,6 +159,12 @@ type AdminOverview = {
       configured: boolean;
       missingConfiguration: string[];
       usageUnit: string;
+      availableModels: Array<{
+        id: string;
+        label: string;
+        description: string;
+        outputCostUsd: number;
+      }>;
     }>;
   };
   platformUsage: {
@@ -213,13 +232,48 @@ type UserAccount = {
   _count: { generations: number };
 };
 
-const navItems: Array<{ id: Section; label: string; icon: LucideIcon }> = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'traffic', label: 'Site analytics', icon: Activity },
-  { id: 'usage', label: 'Usage & cost', icon: BarChart3 },
-  { id: 'generations', label: 'Generations', icon: ImageIcon },
-  { id: 'users', label: 'Users', icon: Users },
-  { id: 'system', label: 'System health', icon: Server },
+type WaitlistSubscriber = {
+  id: string;
+  phone: string | null;
+  email: string | null;
+  locale: string;
+  source: string;
+  offerCode: string;
+  status: 'new' | 'contacted' | 'invited' | 'converted' | 'archived';
+  notes: string | null;
+  contactedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type WaitlistAudit = {
+  total: number;
+  skip: number;
+  take: number;
+  counts: Record<string, number>;
+  items: WaitlistSubscriber[];
+};
+
+type ProviderCredentialStatus = {
+  provider: 'cloudflare' | 'gemini' | 'openai';
+  fields: Array<{
+    id: 'apiKey' | 'accountId';
+    label: string;
+    configured: boolean;
+    source: 'dashboard' | 'environment' | 'missing';
+    lastFour: string | null;
+  }>;
+};
+
+const navItems: Array<{ id: AdminSection; label: string; icon: LucideIcon; group: string }> = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard, group: 'Workspace' },
+  { id: 'traffic', label: 'Site analytics', icon: Activity, group: 'Workspace' },
+  { id: 'usage', label: 'Usage & cost', icon: BarChart3, group: 'Workspace' },
+  { id: 'generations', label: 'Generations', icon: ImageIcon, group: 'Operations' },
+  { id: 'users', label: 'Users', icon: Users, group: 'Operations' },
+  { id: 'waitlist', label: 'Waiting list', icon: ListChecks, group: 'Operations' },
+  { id: 'system', label: 'System health', icon: Server, group: 'Platform' },
+  { id: 'api-keys', label: 'API keys', icon: KeyRound, group: 'Platform' },
 ];
 
 function money(value: number) {
@@ -250,10 +304,21 @@ export default function AdminPage() {
 
 function AdminDashboard() {
   const router = useRouter();
-  const [section, setSection] = useState<Section>('overview');
+  const pathname = usePathname();
+  const routeSection = pathname.split('/')[2] as AdminSection | undefined;
+  const section: AdminSection =
+    routeSection && adminSections.includes(routeSection) ? routeSection : 'overview';
   const [range, setRange] = useState<Range>(30);
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [accounts, setAccounts] = useState<UserAccount[]>([]);
+  const [waitlist, setWaitlist] = useState<WaitlistAudit>({
+    total: 0,
+    skip: 0,
+    take: 100,
+    counts: {},
+    items: [],
+  });
+  const [credentials, setCredentials] = useState<ProviderCredentialStatus[]>([]);
   const [generationAudit, setGenerationAudit] = useState<GenerationAudit>({
     total: 0,
     skip: 0,
@@ -268,6 +333,7 @@ function AdminDashboard() {
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
   const [selectedRun, setSelectedRun] = useState<GenerationRun | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [logoutOpen, setLogoutOpen] = useState(false);
 
   const load = useCallback(
     async (quiet = false) => {
@@ -275,19 +341,32 @@ function AdminDashboard() {
       else setRefreshing(true);
       setMessage(null);
       try {
-        const [me, overviewResponse, usersResponse, generationsResponse] = await Promise.all([
+        const [
+          me,
+          overviewResponse,
+          usersResponse,
+          generationsResponse,
+          waitlistResponse,
+          credentialsResponse,
+        ] = await Promise.all([
           currentUser(),
           authFetch(`/admin/overview?days=${range}`),
           authFetch('/users'),
           authFetch('/admin/generations?take=100'),
+          authFetch('/admin/waitlist?take=100'),
+          authFetch('/admin/provider-credentials'),
         ]);
         if (!overviewResponse.ok) throw new Error(await apiErrorMessage(overviewResponse));
         if (!usersResponse.ok) throw new Error(await apiErrorMessage(usersResponse));
         if (!generationsResponse.ok) throw new Error(await apiErrorMessage(generationsResponse));
+        if (!waitlistResponse.ok) throw new Error(await apiErrorMessage(waitlistResponse));
+        if (!credentialsResponse.ok) throw new Error(await apiErrorMessage(credentialsResponse));
         setViewer(me);
         setOverview((await overviewResponse.json()) as AdminOverview);
         setAccounts((await usersResponse.json()) as UserAccount[]);
         setGenerationAudit((await generationsResponse.json()) as GenerationAudit);
+        setWaitlist((await waitlistResponse.json()) as WaitlistAudit);
+        setCredentials((await credentialsResponse.json()) as ProviderCredentialStatus[]);
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Dashboard data could not be loaded.');
       } finally {
@@ -301,11 +380,6 @@ function AdminDashboard() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  const selectSection = (next: Section) => {
-    setSection(next);
-    setMenuOpen(false);
-  };
 
   const signOut = async () => {
     await logout();
@@ -358,19 +432,23 @@ function AdminDashboard() {
         </div>
         <span className="ops-workspace-label">Admin workspace</span>
         <nav className="ops-nav" aria-label="Dashboard sections">
-          {navItems.map((item) => {
+          {navItems.map((item, index) => {
             const Icon = item.icon;
             return (
-              <button
-                className={section === item.id ? 'is-active' : ''}
-                key={item.id}
-                type="button"
-                onClick={() => selectSection(item.id)}
-              >
-                <Icon aria-hidden="true" />
-                <span>{item.label}</span>
-                <ChevronRight aria-hidden="true" />
-              </button>
+              <div key={item.id}>
+                {(index === 0 || navItems[index - 1]?.group !== item.group) && (
+                  <span className="ops-nav-group">{item.group}</span>
+                )}
+                <Link
+                  className={section === item.id ? 'is-active' : ''}
+                  href={item.id === 'overview' ? '/admin' : `/admin/${item.id}`}
+                  onClick={() => setMenuOpen(false)}
+                >
+                  <Icon aria-hidden="true" />
+                  <span>{item.label}</span>
+                  <ChevronRight aria-hidden="true" />
+                </Link>
+              </div>
             );
           })}
         </nav>
@@ -385,7 +463,7 @@ function AdminDashboard() {
               <strong>{viewer?.name ?? 'Administrator'}</strong>
               <small>SUPER ADMIN</small>
             </div>
-            <button type="button" onClick={signOut} aria-label="Sign out">
+            <button type="button" onClick={() => setLogoutOpen(true)} aria-label="Sign out">
               <LogOut aria-hidden="true" />
             </button>
           </div>
@@ -489,9 +567,23 @@ function AdminDashboard() {
               editUser={setEditingUser}
             />
           )}
+          {section === 'waitlist' && (
+            <WaitlistPanel
+              audit={waitlist}
+              reload={() => void load(true)}
+              setMessage={setMessage}
+            />
+          )}
           {section === 'system' && overview && (
             <SystemHealth
               overview={overview}
+              reload={() => void load(true)}
+              setMessage={setMessage}
+            />
+          )}
+          {section === 'api-keys' && (
+            <ApiKeysPanel
+              credentials={credentials}
               reload={() => void load(true)}
               setMessage={setMessage}
             />
@@ -510,6 +602,16 @@ function AdminDashboard() {
       )}
       {selectedRun && (
         <GenerationDetailModal run={selectedRun} close={() => setSelectedRun(null)} />
+      )}
+      {logoutOpen && (
+        <ConfirmDialog
+          title="Sign out of Admin?"
+          message="You will need your Super Admin credentials to access platform controls again."
+          confirmLabel="Sign out"
+          tone="danger"
+          onCancel={() => setLogoutOpen(false)}
+          onConfirm={() => void signOut()}
+        />
       )}
     </main>
   );
@@ -573,6 +675,62 @@ function Overview({ overview }: { overview: AdminOverview }) {
           </article>
         ))}
       </section>
+      <section className="ops-health-overview" aria-label="Platform health summary">
+        <article>
+          <span className="is-good">
+            <CheckCircle2 aria-hidden="true" />
+          </span>
+          <div>
+            <small>API & database</small>
+            <strong>Connected</strong>
+          </div>
+        </article>
+        <article>
+          <span className={overview.queue.healthy ? 'is-good' : 'is-warning'}>
+            {overview.queue.healthy ? (
+              <CheckCircle2 aria-hidden="true" />
+            ) : (
+              <AlertTriangle aria-hidden="true" />
+            )}
+          </span>
+          <div>
+            <small>Queue & workers</small>
+            <strong>
+              {overview.queue.healthy ? `${overview.queue.workers} online` : 'Unavailable'}
+            </strong>
+          </div>
+        </article>
+        <article>
+          <span className={overview.configuration.configured ? 'is-good' : 'is-warning'}>
+            {overview.configuration.configured ? (
+              <CheckCircle2 aria-hidden="true" />
+            ) : (
+              <AlertTriangle aria-hidden="true" />
+            )}
+          </span>
+          <div>
+            <small>Image engine</small>
+            <strong>{overview.configuration.provider}</strong>
+          </div>
+        </article>
+        <article>
+          <span
+            className={
+              overview.configuration.storage === 'Cloudflare R2' ? 'is-good' : 'is-warning'
+            }
+          >
+            {overview.configuration.storage === 'Cloudflare R2' ? (
+              <CheckCircle2 aria-hidden="true" />
+            ) : (
+              <AlertTriangle aria-hidden="true" />
+            )}
+          </span>
+          <div>
+            <small>Result storage</small>
+            <strong>{overview.configuration.storage}</strong>
+          </div>
+        </article>
+      </section>
       <section className="ops-grid ops-grid--wide">
         <article className="ops-card ops-chart-card">
           <div className="ops-card-head">
@@ -597,6 +755,60 @@ function Overview({ overview }: { overview: AdminOverview }) {
           </div>
         </article>
         <QueueCard overview={overview} />
+      </section>
+      <section className="ops-grid ops-grid--equal">
+        <article className="ops-card ops-chart-card">
+          <div className="ops-card-head">
+            <div>
+              <span>Spend trend</span>
+              <h2>Daily generation cost</h2>
+            </div>
+            <strong>{overview.range.days} days</strong>
+          </div>
+          <div className="ops-bars ops-bars--spend" aria-label="Estimated spend by day">
+            {overview.trend.map((day, index) => {
+              const maxSpend = Math.max(...overview.trend.map((item) => item.spendUsd), 0.001);
+              return (
+                <div key={day.date} title={`${day.label}: ${money(day.spendUsd)}`}>
+                  <i
+                    style={{
+                      height: `${Math.max((day.spendUsd / maxSpend) * 100, day.spendUsd ? 5 : 2)}%`,
+                    }}
+                  />
+                  <small>
+                    {index % Math.ceil(overview.trend.length / 7) === 0 ? day.label : ''}
+                  </small>
+                </div>
+              );
+            })}
+          </div>
+        </article>
+        <article className="ops-card">
+          <div className="ops-card-head">
+            <div>
+              <span>Reliability</span>
+              <h2>Jobs by status</h2>
+            </div>
+            <strong>{overview.summary.requests} total</strong>
+          </div>
+          <div className="ops-category-list">
+            {overview.statusBreakdown.map((item) => (
+              <div key={item.status}>
+                <div>
+                  <strong>{item.status}</strong>
+                  <span>{item.count} jobs</span>
+                </div>
+                <i>
+                  <b
+                    style={{
+                      width: `${overview.summary.requests ? (item.count / overview.summary.requests) * 100 : 0}%`,
+                    }}
+                  />
+                </i>
+              </div>
+            ))}
+          </div>
+        </article>
       </section>
       <RecentTable runs={overview.recentGenerations.slice(0, 8)} />
     </>
@@ -859,6 +1071,7 @@ function Usage({ overview }: { overview: AdminOverview }) {
               <span>Category mix</span>
               <h2>Cost by product type</h2>
             </div>
+            <strong>Last {overview.range.days} days</strong>
           </div>
           <div className="ops-category-list">
             {overview.categoryBreakdown.map((item) => (
@@ -886,9 +1099,10 @@ function Usage({ overview }: { overview: AdminOverview }) {
               <span>Team allocation</span>
               <h2>Top consumers</h2>
             </div>
+            <strong>Last {overview.range.days} days</strong>
           </div>
           <div className="ops-consumers">
-            {overview.userConsumption
+            {[...overview.userConsumption]
               .sort((a, b) => b.spendUsd - a.spendUsd)
               .slice(0, 6)
               .map((user) => (
@@ -1109,6 +1323,12 @@ function UsersPanel({
   openInvite: () => void;
   editUser: (user: UserAccount) => void;
 }) {
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [sort, setSort] = useState<
+    'name' | 'status' | 'requests' | 'images' | 'usage' | 'spend' | 'activity'
+  >('activity');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const updateStatus = async (id: string, isActive: boolean) => {
     setMessage(null);
     try {
@@ -1153,6 +1373,52 @@ function UsersPanel({
       setMessage(error instanceof Error ? error.message : 'User ban could not be updated.');
     }
   };
+  const usageFor = (id: string) => consumption.find((item) => item.id === id);
+  const userState = (user: UserAccount) => {
+    if (user.role === 'SUPER_ADMIN') return 'protected';
+    if (!user.isActive) return 'deactivated';
+    if (user.bannedUntil && new Date(user.bannedUntil).getTime() > Date.now()) return 'banned';
+    return 'active';
+  };
+  const sortValue = (user: UserAccount) => {
+    const usage = usageFor(user.id);
+    if (sort === 'name') return user.name.toLowerCase();
+    if (sort === 'status') return userState(user);
+    if (sort === 'requests') return usage?.requests ?? 0;
+    if (sort === 'images') return usage?.images ?? 0;
+    if (sort === 'usage')
+      return usage?.providerUsage.reduce((sum, item) => sum + item.units, 0) ?? 0;
+    if (sort === 'spend') return usage?.spendUsd ?? 0;
+    return new Date(usage?.lastActivity ?? user.lastLoginAt ?? user.createdAt).getTime();
+  };
+  const visibleAccounts = accounts
+    .filter((user) => {
+      const needle = search.trim().toLowerCase();
+      const matchesSearch = !needle || `${user.name} ${user.email}`.toLowerCase().includes(needle);
+      return matchesSearch && (statusFilter === 'all' || userState(user) === statusFilter);
+    })
+    .sort((left, right) => {
+      const leftValue = sortValue(left);
+      const rightValue = sortValue(right);
+      const comparison =
+        typeof leftValue === 'number' && typeof rightValue === 'number'
+          ? leftValue - rightValue
+          : String(leftValue).localeCompare(String(rightValue));
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+  const changeSort = (next: typeof sort) => {
+    if (next === sort) setSortDirection((current) => (current === 'asc' ? 'desc' : 'asc'));
+    else {
+      setSort(next);
+      setSortDirection('desc');
+    }
+  };
+  const SortHeading = ({ id, children }: { id: typeof sort; children: string }) => (
+    <button type="button" onClick={() => changeSort(id)}>
+      {children}
+      {sort === id ? <ArrowDownAZ aria-hidden="true" /> : <ArrowUpDown aria-hidden="true" />}
+    </button>
+  );
   return (
     <>
       <PageHeading
@@ -1161,119 +1427,531 @@ function UsersPanel({
         copy="Create individual Studio accounts, suspend access, and see every customer's images, provider usage, spend, failures, and last activity."
       />
       <section className="ops-card ops-users-card">
-        <div className="ops-card-head">
+        <div className="ops-card-head ops-users-head">
           <div>
             <span>Customer accounts</span>
-            <h2>{accounts.length} accounts</h2>
+            <h2>
+              {visibleAccounts.length} of {accounts.length} accounts
+            </h2>
           </div>
-          <button className="ops-inline-button" type="button" onClick={openInvite}>
-            <Plus aria-hidden="true" />
-            New account
-          </button>
+          <div className="ops-table-tools">
+            <label>
+              <Search aria-hidden="true" />
+              <input
+                aria-label="Search users"
+                placeholder="Search name or email"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </label>
+            <select
+              aria-label="Filter users by status"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
+              <option value="all">All account states</option>
+              <option value="active">Active</option>
+              <option value="banned">Temporarily banned</option>
+              <option value="deactivated">Deactivated</option>
+              <option value="protected">Super Admin</option>
+            </select>
+            <button className="ops-inline-button" type="button" onClick={openInvite}>
+              <Plus aria-hidden="true" /> New account
+            </button>
+          </div>
         </div>
-        <div className="ops-user-list">
-          {accounts.map((user) => {
-            const usage = consumption.find((item) => item.id === user.id);
-            const usageLabel = usage?.providerUsage.length
-              ? usage.providerUsage.map((item) => `${compact(item.units)} ${item.unit}`).join(' + ')
-              : '0 units';
-            const isSuperAdmin = user.role === 'SUPER_ADMIN';
-            const isBanned = Boolean(
-              user.bannedUntil && new Date(user.bannedUntil).getTime() > Date.now(),
-            );
-            return (
-              <article key={user.id}>
-                <div className="ops-user-identity">
-                  <span>{user.name.slice(0, 2).toUpperCase()}</span>
-                  <div>
-                    <strong>{user.name}</strong>
-                    <small>{user.email}</small>
-                    <em>
-                      {isSuperAdmin
-                        ? 'Super Admin · Protected'
-                        : isBanned
-                          ? `Banned until ${dateTime(user.bannedUntil)}`
-                          : user.lastLoginAt
-                            ? `Last login ${dateTime(user.lastLoginAt)}`
-                            : usage?.lastActivity
-                              ? `Last generation ${dateTime(usage.lastActivity)}`
-                              : 'Studio user · No activity'}
-                    </em>
-                  </div>
-                </div>
-                <div className="ops-user-stat">
-                  <small>Requests</small>
-                  <strong>
-                    {user.policyUsage.requestsThisHour}/{user.requestLimitPerHour || '∞'} hr
-                  </strong>
-                  <em>
-                    {user.policyUsage.requestsToday}/{user.requestLimitPerDay || '∞'} today
-                  </em>
-                </div>
-                <div className="ops-user-stat">
-                  <small>Images</small>
-                  <strong>{usage?.images ?? 0}</strong>
-                  <em>Max {user.maxVariantsPerRequest} per request</em>
-                </div>
-                <div className="ops-user-stat">
-                  <small>Provider usage</small>
-                  <strong>{usageLabel}</strong>
-                </div>
-                <div className="ops-user-stat">
-                  <small>Spend</small>
-                  <strong>{money(usage?.spendUsd ?? 0)}</strong>
-                  <em>{usage?.failures ?? 0} failed</em>
-                </div>
-                <div className="ops-user-controls">
-                  <button
-                    className={`ops-user-state ${user.isActive && !isBanned ? 'is-active' : ''}`}
-                    type="button"
-                    disabled={isSuperAdmin}
-                    onClick={() => void updateStatus(user.id, !user.isActive)}
-                  >
-                    {isSuperAdmin
-                      ? 'Protected'
-                      : !user.isActive
-                        ? 'Deactivated'
-                        : isBanned
-                          ? 'Temporarily banned'
-                          : 'Active'}
-                  </button>
-                  <div className="ops-user-actions">
-                    <button
-                      className={isBanned ? 'is-warning' : ''}
-                      type="button"
-                      disabled={isSuperAdmin}
-                      onClick={() => void updateBan(user, isBanned ? null : 24)}
-                      aria-label={isBanned ? `Unban ${user.name}` : `Ban ${user.name} for 24 hours`}
-                    >
-                      {isBanned ? <Clock3 aria-hidden="true" /> : <Ban aria-hidden="true" />}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSuperAdmin}
-                      onClick={() => editUser(user)}
-                      aria-label={`Edit ${user.name}`}
-                    >
-                      <Pencil aria-hidden="true" />
-                    </button>
-                    <button
-                      className="is-danger"
-                      type="button"
-                      disabled={isSuperAdmin}
-                      onClick={() => void deleteUser(user)}
-                      aria-label={`Delete ${user.name}`}
-                    >
-                      <Trash2 aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-              </article>
-            );
-          })}
+        <div className="ops-table-wrap ops-users-table">
+          <table>
+            <thead>
+              <tr>
+                <th>
+                  <SortHeading id="name">Customer</SortHeading>
+                </th>
+                <th>
+                  <SortHeading id="status">Status</SortHeading>
+                </th>
+                <th>
+                  <SortHeading id="requests">Requests</SortHeading>
+                </th>
+                <th>
+                  <SortHeading id="images">Images</SortHeading>
+                </th>
+                <th>
+                  <SortHeading id="usage">Provider usage</SortHeading>
+                </th>
+                <th>
+                  <SortHeading id="spend">Spend</SortHeading>
+                </th>
+                <th>
+                  <SortHeading id="activity">Last activity</SortHeading>
+                </th>
+                <th>Controls</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleAccounts.map((user) => {
+                const usage = usageFor(user.id);
+                const usageLabel = usage?.providerUsage.length
+                  ? usage.providerUsage
+                      .map((item) => `${compact(item.units)} ${item.unit}`)
+                      .join(' + ')
+                  : '0 units';
+                const isSuperAdmin = user.role === 'SUPER_ADMIN';
+                const isBanned = Boolean(
+                  user.bannedUntil && new Date(user.bannedUntil).getTime() > Date.now(),
+                );
+                return (
+                  <tr key={user.id}>
+                    <td>
+                      <div className="ops-user-identity">
+                        <span>{user.name.slice(0, 2).toUpperCase()}</span>
+                        <div>
+                          <strong>{user.name}</strong>
+                          <small>{user.email}</small>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`ops-account-state is-${userState(user)}`}>
+                        {userState(user) === 'protected' ? (
+                          <ShieldCheck aria-hidden="true" />
+                        ) : userState(user) === 'active' ? (
+                          <UserCheck aria-hidden="true" />
+                        ) : (
+                          <UserX aria-hidden="true" />
+                        )}
+                        {userState(user)}
+                      </span>
+                      {isBanned && <small>Until {dateTime(user.bannedUntil)}</small>}
+                    </td>
+                    <td>
+                      <strong>
+                        {user.policyUsage.requestsThisHour}/{user.requestLimitPerHour || '∞'} hr
+                      </strong>
+                      <small>
+                        {user.policyUsage.requestsToday}/{user.requestLimitPerDay || '∞'} today
+                      </small>
+                    </td>
+                    <td>
+                      <strong>{usage?.images ?? 0}</strong>
+                      <small>Max {user.maxVariantsPerRequest}/request</small>
+                    </td>
+                    <td>
+                      <strong>{usageLabel}</strong>
+                    </td>
+                    <td>
+                      <strong>{money(usage?.spendUsd ?? 0)}</strong>
+                      <small>{usage?.failures ?? 0} failed</small>
+                    </td>
+                    <td>
+                      <strong>{dateTime(usage?.lastActivity ?? user.lastLoginAt)}</strong>
+                      <small>{user.loginCount} logins</small>
+                    </td>
+                    <td>
+                      <div className="ops-user-controls">
+                        <button
+                          className={`ops-user-state ${user.isActive && !isBanned ? 'is-active' : ''}`}
+                          type="button"
+                          disabled={isSuperAdmin}
+                          onClick={() => void updateStatus(user.id, !user.isActive)}
+                        >
+                          {isSuperAdmin ? 'Protected' : user.isActive ? 'Enabled' : 'Disabled'}
+                        </button>
+                        <div className="ops-user-actions">
+                          <button
+                            className={isBanned ? 'is-warning' : ''}
+                            type="button"
+                            disabled={isSuperAdmin}
+                            onClick={() => void updateBan(user, isBanned ? null : 24)}
+                            aria-label={
+                              isBanned ? `Unban ${user.name}` : `Ban ${user.name} for 24 hours`
+                            }
+                          >
+                            {isBanned ? <Clock3 aria-hidden="true" /> : <Ban aria-hidden="true" />}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSuperAdmin}
+                            onClick={() => editUser(user)}
+                            aria-label={`Edit ${user.name}`}
+                          >
+                            <Pencil aria-hidden="true" />
+                          </button>
+                          <button
+                            className="is-danger"
+                            type="button"
+                            disabled={isSuperAdmin}
+                            onClick={() => void deleteUser(user)}
+                            aria-label={`Delete ${user.name}`}
+                          >
+                            <Trash2 aria-hidden="true" />
+                          </button>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!visibleAccounts.length && (
+                <tr>
+                  <td className="ops-empty" colSpan={8}>
+                    No users match these filters.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
     </>
+  );
+}
+
+function WaitlistPanel({
+  audit,
+  reload,
+  setMessage,
+}: {
+  audit: WaitlistAudit;
+  reload: () => void;
+  setMessage: (message: string | null) => void;
+}) {
+  const [search, setSearch] = useState('');
+  const [status, setStatus] = useState('all');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const visible = audit.items
+    .filter((item) => {
+      const needle = search.trim().toLowerCase();
+      const matches =
+        !needle ||
+        `${item.phone ?? ''} ${item.email ?? ''} ${item.source} ${item.notes ?? ''}`
+          .toLowerCase()
+          .includes(needle);
+      return matches && (status === 'all' || item.status === status);
+    })
+    .sort((left, right) =>
+      sortDirection === 'asc'
+        ? new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
+        : new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
+    );
+  const remove = async (item: WaitlistSubscriber) => {
+    if (!window.confirm(`Remove ${item.phone ?? item.email ?? 'this lead'} from the waiting list?`))
+      return;
+    const response = await authFetch(`/admin/waitlist/${item.id}`, { method: 'DELETE' });
+    if (!response.ok) setMessage(await apiErrorMessage(response));
+    else reload();
+  };
+  return (
+    <>
+      <PageHeading
+        eyebrow="Launch pipeline"
+        title="Waiting list and leads."
+        copy="Search every launch lead, track contact progress, save internal notes, and move people from interest to converted customer."
+      />
+      <section className="ops-metrics ops-metrics--five">
+        {(['new', 'contacted', 'invited', 'converted', 'archived'] as const).map((item) => (
+          <article key={item}>
+            <div>
+              <ListChecks aria-hidden="true" />
+              <span>CRM</span>
+            </div>
+            <small>{item}</small>
+            <strong>{audit.counts[item] ?? 0}</strong>
+            <p>Waiting-list contacts</p>
+          </article>
+        ))}
+      </section>
+      <section className="ops-card ops-table-card">
+        <div className="ops-card-head ops-users-head">
+          <div>
+            <span>Lead database</span>
+            <h2>
+              {visible.length} of {audit.total} subscribers
+            </h2>
+          </div>
+          <div className="ops-table-tools">
+            <label>
+              <Search aria-hidden="true" />
+              <input
+                aria-label="Search waiting list"
+                placeholder="Search phone, email or notes"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </label>
+            <select
+              aria-label="Filter waiting list"
+              value={status}
+              onChange={(event) => setStatus(event.target.value)}
+            >
+              <option value="all">All stages</option>
+              <option value="new">New</option>
+              <option value="contacted">Contacted</option>
+              <option value="invited">Invited</option>
+              <option value="converted">Converted</option>
+              <option value="archived">Archived</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => setSortDirection((value) => (value === 'asc' ? 'desc' : 'asc'))}
+            >
+              <ArrowUpDown aria-hidden="true" /> {sortDirection === 'asc' ? 'Oldest' : 'Newest'}
+            </button>
+          </div>
+        </div>
+        <div className="ops-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Contact</th>
+                <th>Stage</th>
+                <th>Language</th>
+                <th>Source</th>
+                <th>Internal note</th>
+                <th>Joined</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((item) => (
+                <WaitlistRow
+                  key={item.id}
+                  item={item}
+                  reload={reload}
+                  setMessage={setMessage}
+                  remove={() => void remove(item)}
+                />
+              ))}
+              {!visible.length && (
+                <tr>
+                  <td className="ops-empty" colSpan={7}>
+                    No waiting-list contacts match these filters.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function WaitlistRow({
+  item,
+  reload,
+  setMessage,
+  remove,
+}: {
+  item: WaitlistSubscriber;
+  reload: () => void;
+  setMessage: (message: string | null) => void;
+  remove: () => void;
+}) {
+  const [notes, setNotes] = useState(item.notes ?? '');
+  const update = async (payload: { status?: string; notes?: string }) => {
+    const response = await authFetch(`/admin/waitlist/${item.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) setMessage(await apiErrorMessage(response));
+    else reload();
+  };
+  return (
+    <tr>
+      <td>
+        <strong>{item.phone ?? item.email ?? 'No contact'}</strong>
+        <small>{item.phone && item.email ? item.email : item.offerCode.replaceAll('_', ' ')}</small>
+      </td>
+      <td>
+        <select
+          className="ops-stage-select"
+          aria-label={`Stage for ${item.phone ?? item.email}`}
+          value={item.status}
+          onChange={(event) => void update({ status: event.target.value })}
+        >
+          <option value="new">New</option>
+          <option value="contacted">Contacted</option>
+          <option value="invited">Invited</option>
+          <option value="converted">Converted</option>
+          <option value="archived">Archived</option>
+        </select>
+      </td>
+      <td>
+        <span className="ops-locale">{item.locale.toUpperCase()}</span>
+      </td>
+      <td>
+        <strong>{item.source}</strong>
+      </td>
+      <td>
+        <input
+          className="ops-note-input"
+          aria-label={`Note for ${item.phone ?? item.email}`}
+          placeholder="Add a note"
+          value={notes}
+          onChange={(event) => setNotes(event.target.value)}
+          onBlur={() => {
+            if (notes !== (item.notes ?? '')) void update({ notes });
+          }}
+        />
+      </td>
+      <td>{dateTime(item.createdAt)}</td>
+      <td>
+        <button
+          className="ops-icon-danger"
+          type="button"
+          onClick={remove}
+          aria-label="Remove subscriber"
+        >
+          <Trash2 aria-hidden="true" />
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function ApiKeysPanel({
+  credentials,
+  reload,
+  setMessage,
+}: {
+  credentials: ProviderCredentialStatus[];
+  reload: () => void;
+  setMessage: (message: string | null) => void;
+}) {
+  return (
+    <>
+      <PageHeading
+        eyebrow="Secure provider vault"
+        title="Connect image providers."
+        copy="Add or rotate generation credentials without exposing them to the browser again. Keys are encrypted before they are stored and only the final four characters remain visible."
+      />
+      <div className="ops-alert">
+        <ShieldCheck aria-hidden="true" />
+        <div>
+          <strong>Write-only credential management</strong>
+          <span>
+            Existing secrets cannot be copied or revealed. Saving a new value immediately replaces
+            the active credential for future jobs.
+          </span>
+        </div>
+      </div>
+      <section className="ops-credential-grid">
+        {credentials.map((provider) => (
+          <ProviderCredentialCard
+            key={provider.provider}
+            provider={provider}
+            reload={reload}
+            setMessage={setMessage}
+          />
+        ))}
+      </section>
+    </>
+  );
+}
+
+function ProviderCredentialCard({
+  provider,
+  reload,
+  setMessage,
+}: {
+  provider: ProviderCredentialStatus;
+  reload: () => void;
+  setMessage: (message: string | null) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    setSaving(true);
+    setMessage(null);
+    const form = new FormData(formElement);
+    const response = await authFetch('/admin/provider-credentials', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: provider.provider,
+        apiKey: form.get('apiKey'),
+        ...(provider.provider === 'cloudflare'
+          ? { accountId: form.get('accountId') || undefined }
+          : {}),
+      }),
+    });
+    if (!response.ok) setMessage(await apiErrorMessage(response));
+    else {
+      formElement.reset();
+      reload();
+    }
+    setSaving(false);
+  };
+  const title =
+    provider.provider === 'cloudflare'
+      ? 'Cloudflare Workers AI'
+      : provider.provider === 'gemini'
+        ? 'Google Gemini'
+        : 'OpenAI';
+  return (
+    <form className="ops-card ops-credential-card" onSubmit={submit}>
+      <div className="ops-card-head">
+        <div>
+          <span>Image provider</span>
+          <h2>{title}</h2>
+        </div>
+        <KeyRound aria-hidden="true" />
+      </div>
+      <div className="ops-credential-statuses">
+        {provider.fields.map((field) => (
+          <div key={field.id}>
+            <span className={field.configured ? 'is-good' : 'is-warning'}>
+              {field.configured ? (
+                <CheckCircle2 aria-hidden="true" />
+              ) : (
+                <AlertTriangle aria-hidden="true" />
+              )}
+            </span>
+            <div>
+              <strong>{field.label}</strong>
+              <small>
+                {field.configured
+                  ? `${field.source} · ends in ${field.lastFour ?? '••••'}`
+                  : 'Not configured'}
+              </small>
+            </div>
+          </div>
+        ))}
+      </div>
+      {provider.provider === 'cloudflare' && (
+        <label>
+          <span>Account ID</span>
+          <input
+            name="accountId"
+            minLength={8}
+            required={!provider.fields.find((field) => field.id === 'accountId')?.configured}
+            placeholder="Leave blank to keep the current account ID"
+          />
+        </label>
+      )}
+      <label>
+        <span>New API key or token</span>
+        <input
+          name="apiKey"
+          type="password"
+          autoComplete="new-password"
+          minLength={8}
+          required
+          placeholder="Paste a new credential"
+        />
+      </label>
+      <button className="ops-submit" type="submit" disabled={saving}>
+        {saving ? (
+          <LoaderCircle className="is-spinning" aria-hidden="true" />
+        ) : (
+          <ShieldCheck aria-hidden="true" />
+        )}
+        {saving ? 'Encrypting and saving' : 'Save credential'}
+      </button>
+    </form>
   );
 }
 
@@ -1287,6 +1965,23 @@ function SystemHealth({
   setMessage: (message: string | null) => void;
 }) {
   const [savingProvider, setSavingProvider] = useState<string | null>(null);
+  const selectModel = async (provider: 'cloudflare' | 'gemini' | 'openai', model: string) => {
+    setSavingProvider(provider);
+    setMessage(null);
+    try {
+      const response = await authFetch('/admin/generation-model', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, model }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Model could not be changed.');
+    } finally {
+      setSavingProvider(null);
+    }
+  };
   const selectProvider = async (provider: 'cloudflare' | 'gemini' | 'openai') => {
     setSavingProvider(provider);
     setMessage(null);
@@ -1341,16 +2036,23 @@ function SystemHealth({
     {
       label: 'Daily provider allowance',
       value:
-        overview.configuration.remainingFreeUnits === null
-          ? 'Metered billing'
-          : `${compact(overview.configuration.remainingFreeUnits)} remaining`,
+        overview.configuration.remainingFreeUnits !== null
+          ? `${compact(overview.configuration.remainingFreeUnits)} remaining`
+          : overview.configuration.remainingSpendUsd !== null
+            ? `$${overview.configuration.remainingSpendUsd.toFixed(2)} remaining`
+            : 'Metered billing',
       good:
-        overview.configuration.remainingFreeUnits === null ||
-        overview.configuration.remainingFreeUnits > 0,
+        (overview.configuration.remainingFreeUnits === null ||
+          overview.configuration.remainingFreeUnits > 0) &&
+        (overview.configuration.remainingSpendUsd === null ||
+          overview.configuration.remainingSpendUsd > 0),
       note:
         overview.configuration.estimatedImagesRemaining === null
           ? (overview.platformUsage.reason ?? 'Provider usage is tracked per request.')
-          : `Approximately ${overview.configuration.estimatedImagesRemaining} demo images remain today.`,
+          : `Approximately ${overview.configuration.estimatedImagesRemaining} images remain today` +
+            (overview.configuration.dailySpendLimitUsd === null
+              ? '.'
+              : ` · $${overview.configuration.todaySpendUsd.toFixed(2)} of $${overview.configuration.dailySpendLimitUsd.toFixed(2)} spent.`),
     },
   ];
   return (
@@ -1384,6 +2086,28 @@ function SystemHealth({
                     {provider.quality} · {provider.imageSize}
                   </small>
                 </div>
+                {provider.availableModels.length > 1 && (
+                  <label className="ops-model-picker">
+                    <span>Model</span>
+                    <select
+                      value={provider.model}
+                      disabled={Boolean(savingProvider)}
+                      onChange={(event) =>
+                        void selectModel(provider.provider, event.currentTarget.value)
+                      }
+                    >
+                      {provider.availableModels.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label} · ${option.outputCostUsd.toFixed(3)}/image
+                        </option>
+                      ))}
+                    </select>
+                    <small>
+                      {provider.availableModels.find((option) => option.id === provider.model)
+                        ?.description ?? ''}
+                    </small>
+                  </label>
+                )}
                 <button
                   type="button"
                   disabled={!provider.configured || isCurrent || Boolean(savingProvider)}

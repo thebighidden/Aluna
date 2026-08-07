@@ -23,6 +23,23 @@ export class CreateGenerationDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(160)
+  productType?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(8_000)
   options?: string;
+
+  /** Required when sceneId uses the "ai:" prefix. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  analysisId?: string;
+
+  /** Attach this run to one of the user's campaigns. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campaignId?: string;
 }

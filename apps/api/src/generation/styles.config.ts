@@ -149,6 +149,49 @@ space suitable for advertising copy. Avoid surreal food explosions or invented i
       },
     ],
   },
+  wellness: {
+    label: 'Health & Wellness',
+    scenes: [
+      {
+        id: 'performance',
+        name: 'Performance Studio',
+        promptTemplate: `${FIDELITY_SLOT}
+
+Create a premium sports-nutrition campaign photograph in a purpose-built performance studio, not a
+kitchen or food-preparation environment. Place the exact supplement package upright on a dark matte
+training bench or architectural pedestal with restrained, generic fitness cues in the distant
+background. Keep the complete label, dosage text, certification marks, lid, seal, and package geometry
+visible and unchanged. Use shaped side light, a clean brand-compatible rim accent, neutral fill that
+preserves the package colors, and realistic contact shadows. The result should feel athletic,
+scientific, adult, and commercially credible without making medical or performance claims.`,
+      },
+      {
+        id: 'science',
+        name: 'Sports Science',
+        promptTemplate: `${FIDELITY_SLOT}
+
+Photograph the exact wellness or supplement product in a clean contemporary sports-science setting.
+Use a minimal laboratory-inspired surface, calibrated-looking light, and only generic glassware or a
+closed shaker placed well away from the package. Do not invent ingredients, efficacy claims, dosage,
+certifications, molecular diagrams, or medical equipment. Keep every visible word and brand element
+square to camera and readable. Use an 85 mm product lens, controlled white-to-cool-grey environment,
+precise edge highlights, and a premium evidence-led campaign aesthetic.`,
+      },
+      {
+        id: 'recovery',
+        name: 'Active Recovery',
+        promptTemplate: `${FIDELITY_SLOT}
+
+Create an aspirational adult fitness-recovery lifestyle image with the exact product as the hero in a
+calm gym lounge or recovery studio. A clean towel, closed shaker, and subtle training equipment may sit
+in the background, but nothing may cover or touch the logo, label, safety text, or product silhouette.
+If a person is included, show only a clearly adult athlete in a natural post-training moment without
+implying guaranteed physical results. Use soft directional daylight, restrained brand-color accents,
+natural skin and material rendering, and polished commercial realism. Never place the product in a
+domestic kitchen, cooking, restaurant, or dining context.`,
+      },
+    ],
+  },
   jewelry: {
     label: 'Jewelry',
     scenes: [

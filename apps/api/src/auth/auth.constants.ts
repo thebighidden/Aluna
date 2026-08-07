@@ -14,6 +14,8 @@ export enum Permission {
   SettingsRead = 'settings:read',
   SettingsManage = 'settings:manage',
   AnalyticsRead = 'analytics:read',
+  BrandProfileRead = 'brand-profile:read',
+  BrandProfileManage = 'brand-profile:manage',
 }
 
 const allPermissions = Object.values(Permission);
@@ -28,6 +30,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     Permission.AssetManage,
     Permission.PresetRead,
     Permission.SettingsRead,
+    Permission.BrandProfileRead,
+    Permission.BrandProfileManage,
   ],
 };
 

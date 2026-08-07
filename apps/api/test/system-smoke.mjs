@@ -115,8 +115,8 @@ try {
 
   result = await json('/generations/presets', authorized(adminToken));
   check(
-    result.response.status === 200 && result.body.length === 6,
-    'all six product categories are available',
+    result.response.status === 200 && result.body.length === 7,
+    'all seven product categories are available',
   );
   check(
     result.body.every((category) => category.scenes.length === 3),

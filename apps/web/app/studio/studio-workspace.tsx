@@ -2,6 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element */
 import {
+  ArrowLeft,
   Bell,
   BookOpen,
   Boxes,
@@ -9,6 +10,7 @@ import {
   Clock3,
   Download,
   FolderKanban,
+  Globe,
   History,
   Image as ImageIcon,
   LayoutGrid,
@@ -16,23 +18,46 @@ import {
   LogOut,
   Menu,
   PanelLeftClose,
+  Palette,
   Plus,
   Settings,
+  Share2,
   Shuffle,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Upload,
   WandSparkles,
   X,
   type LucideIcon,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import {
+  ChangeEvent,
+  DragEvent,
+  FormEvent,
+  ReactNode,
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { apiErrorMessage, authFetch, currentUser, logout, StudioUser } from '../lib/auth-client';
+import { ConfirmDialog } from '../components/confirm-dialog';
 
-type StudioSection = 'create' | 'campaigns' | 'library' | 'presets' | 'history' | 'settings';
+type StudioSection =
+  | 'create'
+  | 'brand'
+  | 'campaigns'
+  | 'gallery'
+  | 'library'
+  | 'presets'
+  | 'history'
+  | 'settings';
 
 type ScenePreset = { id: string; name: string };
 type CampaignOptionChoice = { id: string; label: string; description: string };
@@ -65,7 +90,9 @@ type Generation = {
   category: string;
   sceneId: string;
   brief: string | null;
+  productType?: string | null;
   creativeOptions?: Record<string, string> | null;
+  contextWarnings?: string[];
   outputKeys: string[];
   resultUrls: string[];
   costUsd: number;
@@ -74,8 +101,65 @@ type Generation = {
   errorCode?: string | null;
   providerUsageUnits?: number;
   providerUsageUnit?: string;
+  campaignId?: string | null;
+  sharedAt?: string | null;
   createdAt: string;
 };
+
+type Campaign = {
+  id: string;
+  name: string;
+  productType: string | null;
+  category: string;
+  sceneId: string;
+  brief: string | null;
+  creativeOptions: Record<string, string> | null;
+  runs: number;
+  assets: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CampaignRun = {
+  id: string;
+  status: GenerationStatus;
+  category: string;
+  sceneId: string;
+  brief: string | null;
+  productType: string | null;
+  requestedVariants: number;
+  outputKeys: string[];
+  resultUrls: string[];
+  sharedAt: string | null;
+  costUsd: number;
+  error: string | null;
+  createdAt: string;
+};
+
+type CampaignDetail = Campaign & { generations: CampaignRun[] };
+
+type GalleryItem = {
+  id: string;
+  category: string;
+  sceneId: string;
+  productType: string | null;
+  brief: string | null;
+  creativeOptions: Record<string, string> | null;
+  author: string;
+  mine: boolean;
+  assetUrls: string[];
+  sharedAt: string;
+};
+
+type ReusableSettings = {
+  category: string;
+  sceneId: string;
+  productType?: string | null;
+  brief?: string | null;
+  creativeOptions?: Record<string, string> | null;
+};
+
+const reuseSettingsKey = 'aluna-reuse-settings';
 
 const clothingOptionDefaults: Record<string, string> = {
   presentation: 'on-model',
@@ -158,6 +242,15 @@ const fallbackPresets: CategoryPreset[] = [
     ],
   },
   {
+    id: 'wellness',
+    label: 'Health & Wellness',
+    scenes: [
+      { id: 'performance', name: 'Performance Studio' },
+      { id: 'science', name: 'Sports Science' },
+      { id: 'recovery', name: 'Active Recovery' },
+    ],
+  },
+  {
     id: 'jewelry',
     label: 'Jewelry',
     scenes: [
@@ -192,12 +285,16 @@ const sectionItems: Array<{
   icon: typeof Sparkles;
 }> = [
   { id: 'create', label: 'Create', icon: WandSparkles },
+  { id: 'brand', label: 'Brand Profile', icon: Palette },
   { id: 'campaigns', label: 'Campaigns', icon: FolderKanban },
+  { id: 'gallery', label: 'Gallery', icon: Globe },
   { id: 'library', label: 'Asset library', icon: ImageIcon },
   { id: 'presets', label: 'Scene presets', icon: SlidersHorizontal },
   { id: 'history', label: 'Generation history', icon: History },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
+
+const workspaceSectionCount = 7;
 
 const statusCopy: Record<GenerationStatus, string> = {
   queued: 'Queued',
@@ -230,7 +327,52 @@ function displayCategory(id: string): string {
   return fallbackPresets.find((item) => item.id === id)?.label ?? id;
 }
 
+interface ProductSceneConcept {
+  id: string;
+  name: string;
+  rationale: string;
+  environment: string;
+  lighting: string;
+  camera: string;
+  props: string;
+  mood: string;
+}
+
+interface ProductAnalysis {
+  id: string;
+  category: string;
+  productType: string;
+  productClass: string;
+  summary: string;
+  confidence: number;
+  costUsd: number;
+  model: string;
+  attributes: {
+    materials: string[];
+    dominantColors: string[];
+    finish: string;
+    shapeAndScale: string;
+    visibleText: string[];
+    handlingNotes: string[];
+    forbiddenEnvironments: string[];
+  };
+  scenes: ProductSceneConcept[];
+}
+
+function isAiScene(sceneId: string): boolean {
+  return sceneId.startsWith('ai:');
+}
+
 function displayScene(category: string, sceneId: string): string {
+  // AI scene ids are slugs of the name the vision model wrote, so they read well once expanded.
+  if (isAiScene(sceneId)) {
+    return sceneId
+      .slice(3)
+      .split('-')
+      .filter(Boolean)
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+  }
   return (
     fallbackPresets
       .find((item) => item.id === category)
@@ -238,13 +380,46 @@ function displayScene(category: string, sceneId: string): string {
   );
 }
 
-export default function StudioPage() {
+function sectionHref(id: StudioSection): string {
+  return id === 'create' ? '/studio' : `/studio/${id}`;
+}
+
+type StudioContextValue = {
+  user?: StudioUser;
+  presets: CategoryPreset[];
+  generations: Generation[];
+  runtime?: RuntimeConfiguration;
+  assetUrls: Record<string, string>;
+  createProps: CreateSectionProps;
+  changeCategory: (category: string) => void;
+  downloadResult: (path: string, index: number) => void;
+};
+
+const StudioContext = createContext<StudioContextValue | undefined>(undefined);
+
+export function useStudio(): StudioContextValue {
+  const value = useContext(StudioContext);
+  if (!value) throw new Error('useStudio must be used inside the Studio workspace layout');
+  return value;
+}
+
+/**
+ * The workspace shell owns every piece of session state and lives in the route-group layout, so
+ * moving between sections re-renders only the panel instead of re-authenticating and refetching.
+ */
+export default function StudioWorkspace({ children }: { children: ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const routeSection = pathname.split('/')[2] as StudioSection | undefined;
+  const section: StudioSection =
+    routeSection && sectionItems.some((item) => item.id === routeSection)
+      ? routeSection
+      : 'create';
   const fileInput = useRef<HTMLInputElement>(null);
   const objectUrls = useRef<Record<string, string>>({});
   const [user, setUser] = useState<StudioUser>();
-  const [section, setSection] = useState<StudioSection>('create');
   const [mobileNav, setMobileNav] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
   const [presets, setPresets] = useState<CategoryPreset[]>(fallbackPresets);
   const [category, setCategory] = useState('clothing');
   const [sceneId, setSceneId] = useState('studio');
@@ -252,6 +427,7 @@ export default function StudioPage() {
   const [creativeOptions, setCreativeOptions] =
     useState<Record<string, string>>(clothingOptionDefaults);
   const [brief, setBrief] = useState('');
+  const [productType, setProductType] = useState('');
   const [file, setFile] = useState<File>();
   const [inputPreview, setInputPreview] = useState<string>();
   const [generations, setGenerations] = useState<Generation[]>([]);
@@ -261,6 +437,10 @@ export default function StudioPage() {
   const [booting, setBooting] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
+  const [analysis, setAnalysis] = useState<ProductAnalysis>();
+  const [analyzing, setAnalyzing] = useState(false);
+  const [activeCampaign, setActiveCampaign] = useState<{ id: string; name: string }>();
 
   const selectedCategory = useMemo(
     () => presets.find((item) => item.id === category) ?? presets[0],
@@ -341,6 +521,42 @@ export default function StudioPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeGeneration?.id, activeGeneration?.status]);
 
+  // Campaign cards and gallery cards hand their direction over through session storage, which
+  // survives the client-side navigation to the Create panel without adding query-string state.
+  useEffect(() => {
+    if (booting || section !== 'create') return;
+    const stored = window.sessionStorage.getItem(reuseSettingsKey);
+    if (!stored) return;
+    window.sessionStorage.removeItem(reuseSettingsKey);
+    try {
+      const handoff = JSON.parse(stored) as ReusableSettings & {
+        campaignId?: string;
+        campaignName?: string;
+      };
+      applyDirection(presets, handoff);
+      if (handoff.campaignId && handoff.campaignName) {
+        setActiveCampaign({ id: handoff.campaignId, name: handoff.campaignName });
+      } else {
+        setNotice('Settings applied. Add your product photo and generate.');
+      }
+    } catch {
+      // Corrupted hand-off payloads are simply ignored.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booting, section, pathname]);
+
+  function applyDirection(availablePresets: CategoryPreset[], source: ReusableSettings): void {
+    const preset = availablePresets.find((item) => item.id === source.category);
+    if (!preset) return;
+    setCategory(preset.id);
+    // AI-written scenes belong to another user's product analysis, so fall back to a preset scene.
+    const sceneIsPreset = preset.scenes.some((scene) => scene.id === source.sceneId);
+    setSceneId(sceneIsPreset ? source.sceneId : (preset.scenes[0]?.id ?? 'studio'));
+    setCreativeOptions({ ...defaultsForCategory(preset), ...(source.creativeOptions ?? {}) });
+    setBrief(source.brief ?? '');
+    setProductType(source.productType ?? '');
+  }
+
   async function hydrateAssets(items: Generation[]): Promise<void> {
     const paths = items
       .flatMap((item) => item.resultUrls)
@@ -376,6 +592,39 @@ export default function StudioPage() {
     setFile(nextFile);
     setInputPreview(URL.createObjectURL(nextFile));
     setActiveGeneration(undefined);
+    // The previous analysis described a different product; keeping it would mislabel this one.
+    setAnalysis(undefined);
+    if (isAiScene(sceneId)) setSceneId(selectedCategory?.scenes[0]?.id ?? 'studio');
+  }
+
+  async function analyzeProduct() {
+    if (!file) {
+      setError('Add a source image before analysing it.');
+      return;
+    }
+    setError(undefined);
+    setAnalyzing(true);
+    const body = new FormData();
+    body.append('image', file);
+    if (productType.trim()) body.append('productType', productType.trim());
+    if (brief.trim()) body.append('brief', brief.trim());
+    try {
+      const response = await authFetch('/generations/analyze', { method: 'POST', body });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      const result = (await response.json()) as ProductAnalysis;
+      setAnalysis(result);
+      // The vision model also picks the category, and its read of the photo beats the default.
+      if (result.category !== category && presets.some((item) => item.id === result.category)) {
+        setCategory(result.category);
+        setCreativeOptions(defaultsForCategory(presets.find((i) => i.id === result.category)));
+      }
+      if (result.scenes[0]) setSceneId(`ai:${result.scenes[0].id}`);
+      setNotice(`Aluna analysed your product: ${result.productType}.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not analyse this product.');
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   function onDrop(event: DragEvent<HTMLButtonElement>) {
@@ -428,8 +677,11 @@ export default function StudioPage() {
     body.append('category', category);
     body.append('sceneId', sceneId);
     body.append('variants', String(variants));
+    if (productType.trim()) body.append('productType', productType.trim());
     body.append('options', JSON.stringify(creativeOptions));
     if (brief.trim()) body.append('brief', brief.trim());
+    if (analysis && isAiScene(sceneId)) body.append('analysisId', analysis.id);
+    if (activeCampaign) body.append('campaignId', activeCampaign.id);
     try {
       const response = await authFetch('/generations', { method: 'POST', body });
       if (!response.ok) throw new Error(await apiErrorMessage(response));
@@ -438,16 +690,21 @@ export default function StudioPage() {
         status: GenerationStatus;
         provider: string;
         model: string;
+        category: string;
+        sceneId: string;
+        contextWarnings: string[];
       };
       const queued: Generation = {
         id: created.id,
         status: created.status,
         provider: created.provider,
         model: created.model,
-        category,
-        sceneId,
+        category: created.category,
+        sceneId: created.sceneId,
+        productType: productType.trim() || null,
         brief: brief.trim() || null,
         creativeOptions,
+        contextWarnings: created.contextWarnings,
         outputKeys: [],
         resultUrls: [],
         costUsd: 0,
@@ -457,6 +714,7 @@ export default function StudioPage() {
       };
       setActiveGeneration(queued);
       setGenerations((current) => [queued, ...current]);
+      if (created.contextWarnings.length) setNotice(created.contextWarnings.join(' '));
     } catch (generationError) {
       setError(
         generationError instanceof Error
@@ -465,6 +723,27 @@ export default function StudioPage() {
       );
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function toggleShare(generation: Generation): Promise<void> {
+    try {
+      const response = await authFetch(`/generations/${generation.id}/share`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shared: !generation.sharedAt }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      const next = (await response.json()) as Generation;
+      setGenerations((current) => current.map((item) => (item.id === next.id ? next : item)));
+      setActiveGeneration((current) => (current?.id === next.id ? next : current));
+      setNotice(
+        next.sharedAt
+          ? 'This campaign is now visible in the shared gallery.'
+          : 'This campaign was removed from the shared gallery.',
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not update sharing.');
     }
   }
 
@@ -520,50 +799,44 @@ export default function StudioPage() {
 
         <nav className="studio-nav" aria-label="Studio navigation">
           <p>Workspace</p>
-          {sectionItems.slice(0, 5).map((item) => {
+          {sectionItems.slice(0, workspaceSectionCount).map((item) => {
             const Icon = item.icon;
             return (
-              <button
+              <Link
                 className={section === item.id ? 'active' : ''}
                 key={item.id}
-                type="button"
-                onClick={() => {
-                  setSection(item.id);
-                  setMobileNav(false);
-                }}
+                href={sectionHref(item.id)}
+                onClick={() => setMobileNav(false)}
               >
                 <Icon size={17} />
                 <span>{item.label}</span>
                 {item.id === 'library' && <small>{completedAssets}</small>}
-              </button>
+              </Link>
             );
           })}
           <p>Manage</p>
-          {sectionItems.slice(5).map((item) => {
+          {sectionItems.slice(workspaceSectionCount).map((item) => {
             const Icon = item.icon;
             return (
-              <button
+              <Link
                 className={section === item.id ? 'active' : ''}
                 key={item.id}
-                type="button"
-                onClick={() => {
-                  setSection(item.id);
-                  setMobileNav(false);
-                }}
+                href={sectionHref(item.id)}
+                onClick={() => setMobileNav(false)}
               >
                 <Icon size={17} />
                 <span>{item.label}</span>
-              </button>
+              </Link>
             );
           })}
         </nav>
 
         <div className="studio-sidebar-foot">
-          <button type="button" onClick={() => setSection('presets')}>
+          <Link href="/studio/presets">
             <BookOpen size={16} />
             Prompting guide
-          </button>
-          <button type="button" onClick={signOut}>
+          </Link>
+          <button type="button" onClick={() => setLogoutOpen(true)}>
             <LogOut size={16} />
             Sign out
           </button>
@@ -638,6 +911,16 @@ export default function StudioPage() {
           </div>
         )}
 
+        {notice && (
+          <div className="studio-context-notice" role="status">
+            <Sparkles size={16} />
+            <span>{notice}</span>
+            <button type="button" aria-label="Dismiss notice" onClick={() => setNotice(undefined)}>
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
         {runtime && !runtime.configured && (
           <div className="studio-error" role="status">
             <span>
@@ -647,66 +930,79 @@ export default function StudioPage() {
           </div>
         )}
 
-        {section === 'create' && (
-          <CreateSection
-            activeGeneration={activeGeneration}
-            assetUrls={assetUrls}
-            brief={brief}
-            canGenerate={canGenerate}
-            creativeOptions={creativeOptions}
-            engineConfigured={Boolean(runtime?.configured)}
-            hasGenerationPermission={hasGenerationPermission}
-            category={category}
-            file={file}
-            fileInput={fileInput}
-            inputPreview={inputPreview}
-            presets={presets}
-            sceneId={sceneId}
-            selectedCategory={selectedCategory}
-            selectedScene={selectedScene}
-            submitting={submitting}
-            variants={variants}
-            maxVariants={user?.maxVariantsPerRequest ?? 12}
-            onBriefChange={setBrief}
-            onCategoryChange={changeCategory}
-            onCreativeOptionChange={changeCreativeOption}
-            onDownload={downloadResult}
-            onDrop={onDrop}
-            onFileChange={onFileChange}
-            onSceneChange={setSceneId}
-            onRandomizeCreativeOptions={randomizeCreativeOptions}
-            onSubmit={createGeneration}
-            onVariantsChange={setVariants}
-          />
-        )}
-        {section === 'campaigns' && (
-          <CampaignsSection generations={generations} onCreate={() => setSection('create')} />
-        )}
-        {section === 'library' && (
-          <LibrarySection
-            generations={generations}
-            assetUrls={assetUrls}
-            onDownload={downloadResult}
-          />
-        )}
-        {section === 'presets' && (
-          <PresetsSection
-            presets={presets}
-            onUse={changeCategory}
-            goCreate={() => setSection('create')}
-          />
-        )}
-        {section === 'history' && <HistorySection generations={generations} />}
-        {section === 'settings' && user && <SettingsSection runtime={runtime} user={user} />}
+        <StudioContext.Provider
+          value={{
+            user,
+            presets,
+            generations,
+            runtime,
+            assetUrls,
+            changeCategory,
+            downloadResult,
+            createProps: {
+              activeGeneration,
+              activeCampaign,
+              assetUrls,
+              brief,
+              productType,
+              canGenerate,
+              creativeOptions,
+              engineConfigured: Boolean(runtime?.configured),
+              hasGenerationPermission,
+              category,
+              file,
+              fileInput,
+              inputPreview,
+              presets,
+              sceneId,
+              selectedCategory,
+              selectedScene,
+              submitting,
+              variants,
+              maxVariants: user?.maxVariantsPerRequest ?? 12,
+              analysis,
+              analyzing,
+              hasFile: Boolean(file),
+              onAnalyze: analyzeProduct,
+              onBriefChange: setBrief,
+              onProductTypeChange: setProductType,
+              onCategoryChange: changeCategory,
+              onCreativeOptionChange: changeCreativeOption,
+              onDownload: downloadResult,
+              onDrop,
+              onFileChange,
+              onSceneChange: setSceneId,
+              onRandomizeCreativeOptions: randomizeCreativeOptions,
+              onSubmit: createGeneration,
+              onVariantsChange: setVariants,
+              onDetachCampaign: () => setActiveCampaign(undefined),
+              onToggleShare: (generation) => void toggleShare(generation),
+            },
+          }}
+        >
+          {children}
+        </StudioContext.Provider>
       </section>
+      {logoutOpen && (
+        <ConfirmDialog
+          title="Sign out of Studio?"
+          message="Your completed campaigns stay saved, but you will need to sign in again to continue working."
+          confirmLabel="Sign out"
+          tone="danger"
+          onCancel={() => setLogoutOpen(false)}
+          onConfirm={() => void signOut()}
+        />
+      )}
     </main>
   );
 }
 
 type CreateSectionProps = {
   activeGeneration?: Generation;
+  activeCampaign?: { id: string; name: string };
   assetUrls: Record<string, string>;
   brief: string;
+  productType: string;
   canGenerate: boolean;
   creativeOptions: Record<string, string>;
   engineConfigured: boolean;
@@ -722,7 +1018,12 @@ type CreateSectionProps = {
   submitting: boolean;
   variants: number;
   maxVariants: number;
+  analysis?: ProductAnalysis;
+  analyzing: boolean;
+  hasFile: boolean;
+  onAnalyze: () => void;
   onBriefChange: (value: string) => void;
+  onProductTypeChange: (value: string) => void;
   onCategoryChange: (value: string) => void;
   onCreativeOptionChange: (optionId: string, value: string) => void;
   onDownload: (path: string, index: number) => void;
@@ -732,9 +1033,11 @@ type CreateSectionProps = {
   onSceneChange: (value: string) => void;
   onSubmit: (event: FormEvent) => void;
   onVariantsChange: (value: number) => void;
+  onDetachCampaign: () => void;
+  onToggleShare: (generation: Generation) => void;
 };
 
-function CreateSection(props: CreateSectionProps) {
+export function CreateSection(props: CreateSectionProps) {
   const working =
     props.submitting ||
     (props.activeGeneration && !['done', 'failed'].includes(props.activeGeneration.status));
@@ -766,17 +1069,47 @@ function CreateSection(props: CreateSectionProps) {
         </div>
       </div>
 
-      <div
-        className={`studio-create-grid ${props.activeGeneration ? '' : 'studio-create-grid--builder-only'}`}
-      >
+      {props.activeCampaign && (
+        <div className="studio-campaign-chip" role="status">
+          <FolderKanban size={15} />
+          <span>
+            New photos will be saved to campaign <strong>{props.activeCampaign.name}</strong>
+          </span>
+          <button
+            type="button"
+            aria-label="Stop saving to this campaign"
+            onClick={props.onDetachCampaign}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      <div className="studio-create-grid">
         <form className="studio-builder" onSubmit={props.onSubmit}>
           <section className="studio-card">
-            <div className="studio-card-title">
+            <div className="studio-card-title studio-options-title">
               <span>01</span>
               <div>
                 <h2>Source photo</h2>
                 <p>Use a clear, uncropped photo. Max 15 MB.</p>
               </div>
+              <button
+                className="studio-analyze-product"
+                type="button"
+                disabled={!props.hasFile || props.analyzing}
+                onClick={() => void props.onAnalyze()}
+              >
+                {props.analyzing ? (
+                  <>
+                    <LoaderCircle className="is-spinning" size={14} /> Analysing…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={14} /> {props.analysis ? 'Re-analyse' : 'Analyse product'}
+                  </>
+                )}
+              </button>
             </div>
             <input
               ref={props.fileInput}
@@ -811,6 +1144,62 @@ function CreateSection(props: CreateSectionProps) {
                 </>
               )}
             </button>
+
+            <div className="studio-ai-director">
+              <div className="studio-ai-director-head">
+                <div>
+                  <strong>AI Art Director</strong>
+                  <small>
+                    {props.analysis
+                      ? `Read your product and wrote ${props.analysis.scenes.length} scenes for it.`
+                      : 'Let Aluna study the photo and write scenes for this exact product.'}
+                  </small>
+                </div>
+              </div>
+
+              {props.analysis && (
+                <>
+                  <div className="studio-ai-readout">
+                    <p>
+                      <strong>{props.analysis.productType}</strong>
+                      <span>{Math.round(props.analysis.confidence * 100)}% confident</span>
+                    </p>
+                    <p>{props.analysis.summary}</p>
+                    {props.analysis.attributes.visibleText.length > 0 && (
+                      <p className="studio-ai-chips">
+                        {props.analysis.attributes.visibleText.map((text) => (
+                          <span key={text}>{text}</span>
+                        ))}
+                      </p>
+                    )}
+                    {props.analysis.attributes.handlingNotes.length > 0 && (
+                      <ul>
+                        {props.analysis.attributes.handlingNotes.map((note) => (
+                          <li key={note}>{note}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+
+                  <div className="studio-scene-list">
+                    {props.analysis.scenes.map((scene) => (
+                      <button
+                        className={props.sceneId === `ai:${scene.id}` ? 'active' : ''}
+                        key={scene.id}
+                        type="button"
+                        onClick={() => props.onSceneChange(`ai:${scene.id}`)}
+                      >
+                        <span>
+                          <strong>{scene.name}</strong>
+                          <small>{scene.rationale}</small>
+                        </span>
+                        <i className="studio-radio" />
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </section>
 
           <section className="studio-card">
@@ -821,6 +1210,17 @@ function CreateSection(props: CreateSectionProps) {
                 <p>Choose a product type and campaign setting.</p>
               </div>
             </div>
+            <label className="studio-label" htmlFor="product-type">
+              Exact product type <span>Helps Creative Director choose a credible context</span>
+            </label>
+            <input
+              className="studio-product-type-input"
+              id="product-type"
+              maxLength={160}
+              placeholder="Example: creatine monohydrate powder, oversized cotton T-shirt…"
+              value={props.productType}
+              onChange={(event) => props.onProductTypeChange(event.target.value)}
+            />
             <label className="studio-label">Product category</label>
             <div className="studio-category-grid">
               {props.presets.map((item) => (
@@ -835,7 +1235,9 @@ function CreateSection(props: CreateSectionProps) {
               ))}
             </div>
 
-            <label className="studio-label">Scene preset</label>
+            <label className="studio-label">
+              {props.analysis ? 'Or use a fixed preset' : 'Scene preset'}
+            </label>
             <div className="studio-scene-list">
               {props.selectedCategory?.scenes.map((scene, index) => (
                 <button
@@ -1016,20 +1418,43 @@ function CreateSection(props: CreateSectionProps) {
           </button>
         </form>
 
-        {props.activeGeneration && (
-          <section className="studio-output">
-            <div className="studio-output-head">
-              <div>
-                <span>Campaign results</span>
-                <strong>
-                  {props.selectedCategory?.label} / {props.selectedScene?.name}
-                </strong>
-              </div>
-              <span className="studio-live">
-                <i /> Live generation
-              </span>
+        <section className="studio-output">
+          <div className="studio-output-head">
+            <div>
+              <span>Campaign results</span>
+              <strong>
+                {props.selectedCategory?.label} / {props.selectedScene?.name}
+              </strong>
             </div>
+            {props.activeGeneration &&
+              (props.activeGeneration.status === 'done' ? (
+                <button
+                  className={`studio-share-btn ${props.activeGeneration.sharedAt ? 'is-shared' : ''}`}
+                  type="button"
+                  onClick={() => props.onToggleShare(props.activeGeneration!)}
+                >
+                  <Share2 size={14} />
+                  {props.activeGeneration.sharedAt ? 'Shared · remove' : 'Share to gallery'}
+                </button>
+              ) : (
+                <span className="studio-live">
+                  <i /> Live generation
+                </span>
+              ))}
+          </div>
 
+          {!props.activeGeneration && (
+            <div className="studio-output-empty">
+              <ImageIcon size={26} />
+              <strong>Your results appear here</strong>
+              <p>
+                Set the campaign parameters on the left, then generate to watch every variant
+                arrive live in this panel.
+              </p>
+            </div>
+          )}
+
+          {props.activeGeneration && (
             <div className="studio-generation-output">
               <div className={`studio-job-status is-${props.activeGeneration.status}`}>
                 <span>
@@ -1092,54 +1517,272 @@ function CreateSection(props: CreateSectionProps) {
                 })}
               </div>
             </div>
-          </section>
-        )}
+          )}
+        </section>
       </div>
     </div>
   );
 }
 
-function CampaignsSection({
-  generations,
-  onCreate,
-}: {
-  generations: Generation[];
-  onCreate: () => void;
-}) {
+function useHydratedAssets(paths: string[]): Record<string, string> {
+  const urls = useRef<Record<string, string>>({});
+  const [map, setMap] = useState<Record<string, string>>({});
+  const signature = paths.join('|');
+
+  useEffect(() => {
+    let cancelled = false;
+    const missing = paths.filter((path) => !urls.current[path]).slice(0, 60);
+    void Promise.all(
+      missing.map(async (path) => {
+        try {
+          const response = await authFetch(path);
+          if (!response.ok) return;
+          const url = URL.createObjectURL(await response.blob());
+          if (cancelled) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          urls.current[path] = url;
+          setMap((current) => ({ ...current, [path]: url }));
+        } catch {
+          // Cards stay usable even when one asset cannot be hydrated.
+        }
+      }),
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature]);
+
+  useEffect(() => {
+    const current = urls.current;
+    return () => {
+      Object.values(current).forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, []);
+
+  return map;
+}
+
+/** Hands a campaign or gallery direction to the Create panel across a client-side navigation. */
+function stashHandoff(
+  settings: ReusableSettings & { campaignId?: string; campaignName?: string },
+): void {
+  window.sessionStorage.setItem(reuseSettingsKey, JSON.stringify(settings));
+}
+
+export function CampaignsSection({ presets }: { presets: CategoryPreset[] }) {
+  const router = useRouter();
+  const [campaigns, setCampaigns] = useState<Campaign[]>();
+  const [error, setError] = useState<string>();
+  const [formOpen, setFormOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState('');
+  const [productType, setProductType] = useState('');
+  const [category, setCategory] = useState(presets[0]?.id ?? 'clothing');
+  const [sceneId, setSceneId] = useState(presets[0]?.scenes[0]?.id ?? 'studio');
+  const [brief, setBrief] = useState('');
+
+  const selectedPreset = presets.find((item) => item.id === category) ?? presets[0];
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await authFetch('/campaigns');
+        if (!response.ok) throw new Error(await apiErrorMessage(response));
+        const next = (await response.json()) as Campaign[];
+        if (!cancelled) setCampaigns(next);
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : 'Could not load campaigns.');
+          setCampaigns([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function createCampaign(event: FormEvent) {
+    event.preventDefault();
+    setError(undefined);
+    setSaving(true);
+    try {
+      const response = await authFetch('/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          category,
+          sceneId,
+          productType: productType.trim() || undefined,
+          brief: brief.trim() || undefined,
+        }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      const created = (await response.json()) as Campaign;
+      setCampaigns((current) => [created, ...(current ?? [])]);
+      setFormOpen(false);
+      setName('');
+      setProductType('');
+      setBrief('');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not create the campaign.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="studio-content">
       <div className="studio-page-heading studio-section-heading">
         <div>
           <span className="studio-kicker">Campaign workspace</span>
           <h1>Your campaigns.</h1>
-          <p>Every source, direction, and finished asset in one place.</p>
+          <p>Define a product and its direction once, then generate as many photos as you need.</p>
         </div>
-        <button className="studio-primary-action" type="button" onClick={onCreate}>
-          <Plus size={17} /> New campaign
+        <button
+          className="studio-primary-action"
+          type="button"
+          onClick={() => setFormOpen((open) => !open)}
+        >
+          <Plus size={17} /> {formOpen ? 'Close' : 'New campaign'}
         </button>
       </div>
-      {generations.length === 0 ? (
+
+      {error && (
+        <div className="studio-error" role="alert">
+          <span>{error}</span>
+          <button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}>
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {formOpen && (
+        <form className="studio-card studio-campaign-form" onSubmit={createCampaign}>
+          <div className="studio-brand-fields two-columns">
+            <label>
+              <span>Campaign name</span>
+              <input
+                maxLength={80}
+                minLength={2}
+                placeholder="Example: Summer sneaker drop"
+                required
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Exact product type</span>
+              <input
+                maxLength={160}
+                placeholder="Example: canvas low-top sneakers"
+                value={productType}
+                onChange={(event) => setProductType(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Category</span>
+              <select
+                value={category}
+                onChange={(event) => {
+                  const next = presets.find((item) => item.id === event.target.value);
+                  setCategory(event.target.value);
+                  if (next?.scenes[0]) setSceneId(next.scenes[0].id);
+                }}
+              >
+                {presets.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Scene preset</span>
+              <select value={sceneId} onChange={(event) => setSceneId(event.target.value)}>
+                {selectedPreset?.scenes.map((scene) => (
+                  <option key={scene.id} value={scene.id}>
+                    {scene.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="full-width">
+              <span>Campaign brief (optional)</span>
+              <textarea
+                maxLength={500}
+                placeholder="Shared direction for every photo in this campaign…"
+                value={brief}
+                onChange={(event) => setBrief(event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="studio-campaign-form-actions">
+            <button className="studio-primary-action" disabled={saving} type="submit">
+              {saving ? <LoaderCircle size={15} className="is-spinning" /> : <Plus size={15} />}
+              Create campaign
+            </button>
+          </div>
+        </form>
+      )}
+
+      {!campaigns ? (
+        <div className="studio-empty">
+          <LoaderCircle size={25} />
+          <strong>Loading campaigns</strong>
+        </div>
+      ) : campaigns.length === 0 && !formOpen ? (
         <EmptyState
           icon={FolderKanban}
           title="No campaigns yet"
-          copy="Your first generated campaign will appear here."
+          copy="Create a campaign to define a product once and generate many photos for it."
         />
       ) : (
         <div className="studio-campaign-grid">
-          {generations.map((item) => (
+          {campaigns.map((item) => (
             <article key={item.id}>
               <div className={`studio-campaign-cover is-${item.category}`}>
                 <Boxes size={30} />
                 <span>{displayCategory(item.category)}</span>
               </div>
               <div>
-                <span className={`studio-status is-${item.status}`}>{statusCopy[item.status]}</span>
-                <h3>{displayScene(item.category, item.sceneId)}</h3>
-                <p>{item.brief || 'Preset-led campaign direction'}</p>
+                <h3>{item.name}</h3>
+                <p>
+                  {item.productType || 'Product not specified'} ·{' '}
+                  {displayScene(item.category, item.sceneId)}
+                </p>
                 <footer>
-                  <span>{item.outputKeys.length} assets</span>
-                  <span>{formatDate(item.createdAt)}</span>
+                  <span>
+                    {item.runs} {item.runs === 1 ? 'run' : 'runs'} · {item.assets} photos
+                  </span>
+                  <span>{formatDate(item.updatedAt)}</span>
                 </footer>
+                <div className="studio-campaign-actions">
+                  <Link href={`/studio/campaigns/${item.id}`}>Open</Link>
+                  <button
+                    className="is-primary"
+                    type="button"
+                    onClick={() => {
+                      stashHandoff({
+                        category: item.category,
+                        sceneId: item.sceneId,
+                        productType: item.productType,
+                        brief: item.brief,
+                        creativeOptions: item.creativeOptions,
+                        campaignId: item.id,
+                        campaignName: item.name,
+                      });
+                      router.push('/studio');
+                    }}
+                  >
+                    <Sparkles size={13} /> Generate
+                  </button>
+                </div>
               </div>
             </article>
           ))}
@@ -1149,7 +1792,372 @@ function CampaignsSection({
   );
 }
 
-function LibrarySection({
+export function CampaignDetailSection({ id }: { id: string }) {
+  const router = useRouter();
+  const [detail, setDetail] = useState<CampaignDetail>();
+  const [error, setError] = useState<string>();
+  const [missing, setMissing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const assetPaths = useMemo(
+    () => detail?.generations.flatMap((run) => run.resultUrls) ?? [],
+    [detail],
+  );
+  const images = useHydratedAssets(assetPaths);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await authFetch(`/campaigns/${id}`);
+        if (response.status === 404) {
+          if (!cancelled) setMissing(true);
+          return;
+        }
+        if (!response.ok) throw new Error(await apiErrorMessage(response));
+        const next = (await response.json()) as CampaignDetail;
+        if (!cancelled) setDetail(next);
+      } catch (caught) {
+        if (!cancelled)
+          setError(caught instanceof Error ? caught.message : 'Could not load this campaign.');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  async function toggleRunShare(run: CampaignRun) {
+    try {
+      const response = await authFetch(`/generations/${run.id}/share`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shared: !run.sharedAt }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      const next = (await response.json()) as { sharedAt: string | null };
+      setDetail((current) =>
+        current
+          ? {
+              ...current,
+              generations: current.generations.map((item) =>
+                item.id === run.id ? { ...item, sharedAt: next.sharedAt } : item,
+              ),
+            }
+          : current,
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not update sharing.');
+    }
+  }
+
+  async function download(path: string, index: number) {
+    const response = await authFetch(path);
+    if (!response.ok) {
+      setError(await apiErrorMessage(response));
+      return;
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `aluna-campaign-${String(index + 1).padStart(2, '0')}.png`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function removeCampaign() {
+    const response = await authFetch(`/campaigns/${id}`, { method: 'DELETE' });
+    if (!response.ok) {
+      setError(await apiErrorMessage(response));
+      setDeleteOpen(false);
+      return;
+    }
+    router.push('/studio/campaigns');
+  }
+
+  if (missing) {
+    return (
+      <div className="studio-content">
+        <EmptyState
+          icon={FolderKanban}
+          title="Campaign not found"
+          copy="It may have been deleted. Head back to your campaign list."
+        />
+        <Link className="studio-back-link" href="/studio/campaigns">
+          <ArrowLeft size={15} /> All campaigns
+        </Link>
+      </div>
+    );
+  }
+
+  if (!detail) {
+    return (
+      <div className="studio-content">
+        <div className="studio-empty">
+          <LoaderCircle size={25} />
+          <strong>Opening campaign</strong>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="studio-content">
+      <Link className="studio-back-link" href="/studio/campaigns">
+        <ArrowLeft size={15} /> All campaigns
+      </Link>
+      <div className="studio-page-heading studio-section-heading">
+        <div>
+          <span className="studio-kicker">Campaign</span>
+          <h1>{detail.name}</h1>
+          <p>
+            {detail.productType || 'Product not specified'} ·{' '}
+            {displayCategory(detail.category)} / {displayScene(detail.category, detail.sceneId)}
+            {detail.brief ? ` · ${detail.brief}` : ''}
+          </p>
+        </div>
+        <div className="studio-detail-actions">
+          <button
+            className="studio-danger-action"
+            type="button"
+            onClick={() => setDeleteOpen(true)}
+          >
+            <Trash2 size={15} /> Delete
+          </button>
+          <button
+            className="studio-primary-action"
+            type="button"
+            onClick={() => {
+              stashHandoff({
+                category: detail.category,
+                sceneId: detail.sceneId,
+                productType: detail.productType,
+                brief: detail.brief,
+                creativeOptions: detail.creativeOptions,
+                campaignId: detail.id,
+                campaignName: detail.name,
+              });
+              router.push('/studio');
+            }}
+          >
+            <Sparkles size={15} /> Generate photos
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="studio-error" role="alert">
+          <span>{error}</span>
+          <button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}>
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {detail.generations.length === 0 ? (
+        <EmptyState
+          icon={ImageIcon}
+          title="No photos yet"
+          copy="Generate the first batch — every run you start from this campaign lands here."
+        />
+      ) : (
+        <div className="studio-run-list">
+          {detail.generations.map((run) => (
+            <section className="studio-card studio-run" key={run.id}>
+              <header>
+                <div>
+                  <span className={`studio-status is-${run.status}`}>{statusCopy[run.status]}</span>
+                  <strong>{displayScene(run.category, run.sceneId)}</strong>
+                  <small>
+                    {formatDate(run.createdAt)} · {run.requestedVariants}{' '}
+                    {run.requestedVariants === 1 ? 'image' : 'images'} requested
+                  </small>
+                </div>
+                {run.status === 'done' && run.outputKeys.length > 0 && (
+                  <button
+                    className={`studio-share-btn ${run.sharedAt ? 'is-shared' : ''}`}
+                    type="button"
+                    onClick={() => void toggleRunShare(run)}
+                  >
+                    <Share2 size={14} />
+                    {run.sharedAt ? 'Shared · remove' : 'Share to gallery'}
+                  </button>
+                )}
+              </header>
+              {run.status === 'failed' && run.error && <p className="studio-run-error">{run.error}</p>}
+              {run.resultUrls.length > 0 && (
+                <div className="studio-library-grid studio-run-grid">
+                  {run.resultUrls.map((path, index) => (
+                    <article key={path}>
+                      {images[path] ? (
+                        <img src={images[path]} alt={`Campaign photo ${index + 1}`} />
+                      ) : (
+                        <div>
+                          <LoaderCircle size={22} />
+                        </div>
+                      )}
+                      <footer>
+                        <span>
+                          <strong>Variant {String(index + 1).padStart(2, '0')}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          aria-label={`Download photo ${index + 1}`}
+                          onClick={() => void download(path, index)}
+                        >
+                          <Download size={15} />
+                        </button>
+                      </footer>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          ))}
+        </div>
+      )}
+
+      {deleteOpen && (
+        <ConfirmDialog
+          title={`Delete "${detail.name}"?`}
+          message="The campaign container is removed. Already generated photos stay in your history and library."
+          confirmLabel="Delete campaign"
+          tone="danger"
+          onCancel={() => setDeleteOpen(false)}
+          onConfirm={() => void removeCampaign()}
+        />
+      )}
+    </div>
+  );
+}
+
+export function GallerySection() {
+  const router = useRouter();
+  const [items, setItems] = useState<GalleryItem[]>();
+  const [error, setError] = useState<string>();
+  const covers = useMemo(
+    () => (items ?? []).map((item) => item.assetUrls[0]).filter(Boolean),
+    [items],
+  );
+  const images = useHydratedAssets(covers);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await authFetch('/gallery');
+        if (!response.ok) throw new Error(await apiErrorMessage(response));
+        const next = (await response.json()) as GalleryItem[];
+        if (!cancelled) setItems(next);
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : 'Could not load the gallery.');
+          setItems([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function applySettings(item: GalleryItem) {
+    stashHandoff({
+      category: item.category,
+      sceneId: item.sceneId,
+      productType: item.productType,
+      brief: item.brief,
+      creativeOptions: item.creativeOptions,
+    });
+    router.push('/studio');
+  }
+
+  async function unshare(item: GalleryItem) {
+    try {
+      const response = await authFetch(`/generations/${item.id}/share`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shared: false }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response));
+      setItems((current) => current?.filter((entry) => entry.id !== item.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not remove this item.');
+    }
+  }
+
+  return (
+    <div className="studio-content">
+      <div className="studio-page-heading studio-section-heading">
+        <div>
+          <span className="studio-kicker">Community</span>
+          <h1>Shared gallery.</h1>
+          <p>
+            Campaigns other creators chose to share. Reuse any direction with your own product.
+          </p>
+        </div>
+      </div>
+
+      {error && (
+        <div className="studio-error" role="alert">
+          <span>{error}</span>
+          <button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}>
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {!items ? (
+        <div className="studio-empty">
+          <LoaderCircle size={25} />
+          <strong>Loading gallery</strong>
+        </div>
+      ) : items.length === 0 ? (
+        <EmptyState
+          icon={Globe}
+          title="Nothing shared yet"
+          copy="Finish a campaign and press “Share to gallery” to publish the first one."
+        />
+      ) : (
+        <div className="studio-library-grid studio-gallery-grid">
+          {items.map((item) => (
+            <article key={item.id}>
+              {item.assetUrls[0] && images[item.assetUrls[0]] ? (
+                <img
+                  src={images[item.assetUrls[0]]}
+                  alt={`Shared ${displayCategory(item.category)} campaign`}
+                />
+              ) : (
+                <div>
+                  <LoaderCircle size={22} />
+                </div>
+              )}
+              <footer>
+                <span>
+                  <strong>{item.productType || displayCategory(item.category)}</strong>
+                  <small>
+                    {displayScene(item.category, item.sceneId)} · by {item.author}
+                  </small>
+                </span>
+              </footer>
+              <div className="studio-gallery-actions">
+                <button className="is-primary" type="button" onClick={() => applySettings(item)}>
+                  <WandSparkles size={13} /> Use these settings
+                </button>
+                {item.mine && (
+                  <button type="button" onClick={() => void unshare(item)}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function LibrarySection({
   generations,
   assetUrls,
   onDownload,
@@ -1207,7 +2215,7 @@ function LibrarySection({
   );
 }
 
-function PresetsSection({
+export function PresetsSection({
   presets,
   onUse,
   goCreate,
@@ -1256,7 +2264,7 @@ function PresetsSection({
   );
 }
 
-function HistorySection({ generations }: { generations: Generation[] }) {
+export function HistorySection({ generations }: { generations: Generation[] }) {
   return (
     <div className="studio-content">
       <div className="studio-page-heading studio-section-heading">
@@ -1320,7 +2328,7 @@ function HistorySection({ generations }: { generations: Generation[] }) {
   );
 }
 
-function SettingsSection({ runtime, user }: { runtime?: RuntimeConfiguration; user: StudioUser }) {
+export function SettingsSection({ runtime, user }: { runtime?: RuntimeConfiguration; user: StudioUser }) {
   return (
     <div className="studio-content">
       <div className="studio-page-heading studio-section-heading">

@@ -1,7 +1,7 @@
 import { GenerationStatus, Prisma } from '@prisma/client';
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { lookup } from 'mime-types';
 import OpenAI, { toFile } from 'openai';
@@ -14,6 +14,7 @@ import {
   normalizeCampaignOptions,
 } from './campaign-options.config';
 import { composePrompt, getScene, isProductCategory, ProductCategory } from './styles.config';
+import type { CreativePlan } from '../creative-director/creative-director.types';
 
 const DEFAULT_OPENAI_MODEL = 'gpt-image-2';
 const DEFAULT_OPENAI_IMAGE_OUTPUT_COST_USD = 0.053;
@@ -23,11 +24,84 @@ const DEFAULT_CLOUDFLARE_INPUT_COST_PER_MP_USD = 0.002;
 const DEFAULT_CLOUDFLARE_OUTPUT_NEURONS = 1363.64;
 const DEFAULT_CLOUDFLARE_INPUT_NEURONS_PER_MP = 181.82;
 const CLOUDFLARE_MAX_REFERENCE_EDGE = 511;
+const GEMINI_MAX_REFERENCE_EDGE = 1536;
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-image';
 const DEFAULT_GEMINI_IMAGE_OUTPUT_COST_USD = 0.039;
 
 type ImageQuality = 'low' | 'medium' | 'high' | 'auto';
 export type GenerationProvider = 'cloudflare' | 'gemini' | 'openai';
+
+export interface ProviderModelOption {
+  id: string;
+  label: string;
+  description: string;
+  outputCostUsd: number;
+}
+
+/**
+ * Only models that accept a reference image and return an edited image are listed. Text-to-image
+ * models would silently ignore the product photo, so they are deliberately excluded.
+ */
+const PROVIDER_MODEL_CATALOG: Record<GenerationProvider, ProviderModelOption[]> = {
+  cloudflare: [
+    {
+      id: '@cf/black-forest-labs/flux-2-klein-9b',
+      label: 'FLUX.2 Klein 9B',
+      description: 'Fast four-step editing. Covered by the free daily neuron allocation.',
+      outputCostUsd: 0.015,
+    },
+  ],
+  gemini: [
+    {
+      id: 'gemini-2.5-flash-image',
+      label: 'Nano Banana',
+      description: 'Fast and cheap. The best default for catalogue volume.',
+      outputCostUsd: 0.039,
+    },
+    {
+      id: 'gemini-3.1-flash-lite-image',
+      label: 'Nano Banana 2 Lite',
+      description: 'Cheapest current generation. Price estimated — confirm in AI Studio.',
+      outputCostUsd: 0.03,
+    },
+    {
+      id: 'gemini-3.1-flash-image',
+      label: 'Nano Banana 2',
+      description: 'Current generation flash model. Price estimated — confirm in AI Studio.',
+      outputCostUsd: 0.06,
+    },
+    {
+      id: 'gemini-3-pro-image',
+      label: 'Nano Banana Pro',
+      description: 'Highest fidelity and much stronger legible text. Roughly 3x Nano Banana.',
+      outputCostUsd: 0.134,
+    },
+  ],
+  openai: [
+    {
+      id: 'gpt-image-2',
+      label: 'GPT Image 2',
+      description: 'Latest OpenAI image editing model.',
+      outputCostUsd: 0.053,
+    },
+    {
+      id: 'gpt-image-1',
+      label: 'GPT Image 1',
+      description: 'Previous generation. Cheaper, slightly weaker product fidelity.',
+      outputCostUsd: 0.042,
+    },
+  ],
+};
+export type ProviderCredentialStatus = {
+  provider: GenerationProvider;
+  fields: Array<{
+    id: 'apiKey' | 'accountId';
+    label: string;
+    configured: boolean;
+    source: 'dashboard' | 'environment' | 'missing';
+    lastFour: string | null;
+  }>;
+};
 
 export interface GenerationRuntimeConfiguration {
   provider: GenerationProvider;
@@ -40,6 +114,9 @@ export interface GenerationRuntimeConfiguration {
   usageUnit: 'neurons' | 'tokens';
   dailyFreeUnits: number | null;
   estimatedUnitsPerImage: number | null;
+  estimatedCostPerImageUsd: number;
+  dailySpendLimitUsd: number | null;
+  availableModels: ProviderModelOption[];
 }
 
 export interface GenerateImagesInput {
@@ -47,8 +124,10 @@ export interface GenerateImagesInput {
   category: ProductCategory;
   sceneId: string;
   variants: number;
+  productType?: string;
   brief?: string;
   options?: CampaignOptions;
+  creativePlan?: CreativePlan;
 }
 
 interface ProviderUsage {
@@ -117,6 +196,12 @@ interface GeminiApiResponse {
   error?: { code?: number; message?: string; status?: string };
 }
 
+interface GeminiImageResult {
+  data: Buffer;
+  mimeType: string;
+  usage: ProviderUsage;
+}
+
 interface ProviderErrorMetadata {
   status?: number;
   providerCode?: number;
@@ -128,20 +213,22 @@ interface ProviderErrorMetadata {
 export class GenerationService implements OnModuleInit {
   private readonly logger = new Logger(GenerationService.name);
   private readonly defaultProvider: GenerationProvider;
-  private readonly openAi?: OpenAI;
+  private openAi?: OpenAI;
   private readonly openAiModel: string;
   private readonly openAiQuality: ImageQuality;
   private readonly openAiSize: string;
   private readonly openAiImageOutputCostUsd: number;
-  private readonly cloudflareAccountId?: string;
-  private readonly cloudflareApiToken?: string;
+  private cloudflareAccountId?: string;
+  private cloudflareApiToken?: string;
   private readonly cloudflareModel: string;
   private readonly cloudflareWidth: number;
   private readonly cloudflareHeight: number;
   private readonly cloudflareDailyNeuronBudget: number;
-  private readonly geminiApiKey?: string;
+  private geminiApiKey?: string;
   private readonly geminiModel: string;
   private readonly geminiImageOutputCostUsd: number;
+  private readonly dailySpendLimitUsd: number;
+  private selectedModels: Partial<Record<GenerationProvider, string>> = {};
 
   constructor(
     @Inject(ConfigService) private readonly config: ConfigService,
@@ -176,10 +263,12 @@ export class GenerationService implements OnModuleInit {
     this.geminiImageOutputCostUsd =
       this.config.get<number>('GEMINI_IMAGE_OUTPUT_COST_USD') ??
       DEFAULT_GEMINI_IMAGE_OUTPUT_COST_USD;
+    this.dailySpendLimitUsd = this.config.get<number>('GENERATION_DAILY_SPEND_USD') ?? 0;
     this.defaultProvider = this.resolveDefaultProvider();
   }
 
   async onModuleInit(): Promise<void> {
+    await this.loadStoredCredentials();
     const runtime = await this.getRuntimeConfiguration();
     if (runtime.configured) {
       this.logger.log(`Image provider: ${runtime.providerLabel} (${runtime.model})`);
@@ -217,7 +306,228 @@ export class GenerationService implements OnModuleInit {
     return runtime;
   }
 
+  async setGenerationModel(
+    provider: GenerationProvider,
+    model: string,
+  ): Promise<GenerationRuntimeConfiguration> {
+    if (!this.availableModels(provider).some((option) => option.id === model)) {
+      throw new BadRequestException(`"${model}" is not a selectable model for ${provider}`);
+    }
+    const setting = await this.prisma.platformSetting.findUnique({ where: { id: 'main' } });
+    const stored = this.jsonRecord(setting?.providerModels);
+    stored[provider] = model;
+    await this.prisma.platformSetting.upsert({
+      where: { id: 'main' },
+      create: { id: 'main', providerModels: stored },
+      update: { providerModels: stored },
+    });
+    this.selectedModels[provider] = model;
+    const runtime = this.runtimeForProvider(provider);
+    this.logger.log(`${runtime.providerLabel} model changed to ${runtime.model}`);
+    return runtime;
+  }
+
+  /** Shared with the product-analysis layer, which calls a Gemini text model with the same key. */
+  getGeminiApiKey(): string | undefined {
+    return this.geminiApiKey;
+  }
+
+  async getProviderCredentialStatuses(): Promise<ProviderCredentialStatus[]> {
+    const setting = await this.prisma.platformSetting.findUnique({ where: { id: 'main' } });
+    const stored = this.jsonRecord(setting?.providerCredentials);
+    const metadata = this.jsonRecord(setting?.credentialMetadata);
+    const field = (
+      id: 'apiKey' | 'accountId',
+      label: string,
+      key: string,
+      value?: string,
+    ): ProviderCredentialStatus['fields'][number] => ({
+      id,
+      label,
+      configured: Boolean(value),
+      source: stored[key] ? 'dashboard' : value ? 'environment' : 'missing',
+      lastFour: typeof metadata[key] === 'string' ? metadata[key] : value?.slice(-4) || null,
+    });
+    return [
+      {
+        provider: 'cloudflare',
+        fields: [
+          field(
+            'accountId',
+            'Cloudflare account ID',
+            'cloudflareAccountId',
+            this.cloudflareAccountId,
+          ),
+          field('apiKey', 'Cloudflare API token', 'cloudflareApiKey', this.cloudflareApiToken),
+        ],
+      },
+      {
+        provider: 'gemini',
+        fields: [field('apiKey', 'Google Gemini API key', 'geminiApiKey', this.geminiApiKey)],
+      },
+      {
+        provider: 'openai',
+        fields: [
+          field(
+            'apiKey',
+            'OpenAI project API key',
+            'openAiApiKey',
+            this.openAi
+              ? this.config.get<string>('OPENAI_API_KEY')?.trim() || 'configured'
+              : undefined,
+          ),
+        ],
+      },
+    ];
+  }
+
+  async setProviderCredentials(input: {
+    provider: GenerationProvider;
+    apiKey: string;
+    accountId?: string;
+  }): Promise<ProviderCredentialStatus[]> {
+    const setting = await this.prisma.platformSetting.findUnique({ where: { id: 'main' } });
+    const stored = this.jsonRecord(setting?.providerCredentials);
+    const metadata = this.jsonRecord(setting?.credentialMetadata);
+    const apiKey = input.apiKey.trim();
+    if (input.provider === 'cloudflare') {
+      stored.cloudflareApiKey = this.encryptSecret(apiKey);
+      metadata.cloudflareApiKey = apiKey.slice(-4);
+      if (input.accountId?.trim()) {
+        const accountId = input.accountId.trim();
+        stored.cloudflareAccountId = this.encryptSecret(accountId);
+        metadata.cloudflareAccountId = accountId.slice(-4);
+      }
+    } else if (input.provider === 'gemini') {
+      stored.geminiApiKey = this.encryptSecret(apiKey);
+      metadata.geminiApiKey = apiKey.slice(-4);
+    } else {
+      stored.openAiApiKey = this.encryptSecret(apiKey);
+      metadata.openAiApiKey = apiKey.slice(-4);
+    }
+    await this.prisma.platformSetting.upsert({
+      where: { id: 'main' },
+      create: {
+        id: 'main',
+        providerCredentials: stored,
+        credentialMetadata: metadata,
+      },
+      update: {
+        providerCredentials: stored,
+        credentialMetadata: metadata,
+      },
+    });
+    await this.loadStoredCredentials();
+    this.logger.log(`${input.provider} credentials updated from the admin dashboard`);
+    return this.getProviderCredentialStatuses();
+  }
+
+  private async loadStoredCredentials(): Promise<void> {
+    const setting = await this.prisma.platformSetting.findUnique({ where: { id: 'main' } });
+    const stored = this.jsonRecord(setting?.providerCredentials);
+    const value = (key: string) =>
+      typeof stored[key] === 'string' ? this.decryptSecret(stored[key]) : undefined;
+    const openAiApiKey = value('openAiApiKey') || this.config.get<string>('OPENAI_API_KEY')?.trim();
+    this.openAi = openAiApiKey ? new OpenAI({ apiKey: openAiApiKey }) : undefined;
+    this.geminiApiKey = value('geminiApiKey') || this.config.get<string>('GEMINI_API_KEY')?.trim();
+    this.cloudflareApiToken =
+      value('cloudflareApiKey') || this.config.get<string>('CLOUDFLARE_API_TOKEN')?.trim();
+    this.cloudflareAccountId =
+      value('cloudflareAccountId') ||
+      this.config.get<string>('CLOUDFLARE_ACCOUNT_ID')?.trim() ||
+      this.config.get<string>('R2_ACCOUNT_ID')?.trim();
+
+    const models = this.jsonRecord(setting?.providerModels);
+    this.selectedModels = {
+      cloudflare: models.cloudflare,
+      gemini: models.gemini,
+      openai: models.openai,
+    };
+  }
+
+  private encryptionKey(): Buffer {
+    const root = this.config.get<string>('JWT_ACCESS_SECRET');
+    if (!root) throw new Error('JWT_ACCESS_SECRET is required to protect provider credentials');
+    return createHash('sha256').update(`aluna-provider-credentials:${root}`).digest();
+  }
+
+  private encryptSecret(value: string): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.encryptionKey(), iv);
+    const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+    return [iv, cipher.getAuthTag(), encrypted].map((part) => part.toString('base64url')).join('.');
+  }
+
+  private decryptSecret(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    try {
+      const [iv, tag, encrypted] = value.split('.').map((part) => Buffer.from(part, 'base64url'));
+      if (!iv || !tag || !encrypted) return undefined;
+      const decipher = createDecipheriv('aes-256-gcm', this.encryptionKey(), iv);
+      decipher.setAuthTag(tag);
+      return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+    } catch {
+      this.logger.error('A stored provider credential could not be decrypted');
+      return undefined;
+    }
+  }
+
+  private jsonRecord(value: Prisma.JsonValue | null | undefined): Record<string, string> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string',
+      ),
+    );
+  }
+
+  private environmentModel(provider: GenerationProvider): string {
+    if (provider === 'cloudflare') return this.cloudflareModel;
+    if (provider === 'gemini') return this.geminiModel;
+    return this.openAiModel;
+  }
+
+  private environmentCost(provider: GenerationProvider): number {
+    if (provider === 'cloudflare') return this.estimateCloudflareCost(0.25);
+    if (provider === 'gemini') return this.geminiImageOutputCostUsd;
+    return this.openAiImageOutputCostUsd;
+  }
+
+  /** The catalog, plus the environment-configured model when it is something bespoke. */
+  private availableModels(provider: GenerationProvider): ProviderModelOption[] {
+    const catalog = PROVIDER_MODEL_CATALOG[provider];
+    const configured = this.environmentModel(provider);
+    if (catalog.some((option) => option.id === configured)) return catalog;
+    return [
+      {
+        id: configured,
+        label: configured,
+        description: 'Configured from the environment.',
+        outputCostUsd: this.environmentCost(provider),
+      },
+      ...catalog,
+    ];
+  }
+
+  private resolveModel(provider: GenerationProvider): string {
+    const selected = this.selectedModels[provider];
+    if (selected && this.availableModels(provider).some((option) => option.id === selected)) {
+      return selected;
+    }
+    return this.environmentModel(provider);
+  }
+
+  private modelCost(provider: GenerationProvider, model: string): number {
+    // Cloudflare bills by output dimensions rather than per model, so keep the computed estimate.
+    if (provider === 'cloudflare') return this.estimateCloudflareCost(0.25);
+    return (
+      this.availableModels(provider).find((option) => option.id === model)?.outputCostUsd ??
+      this.environmentCost(provider)
+    );
+  }
+
   private runtimeForProvider(provider: GenerationProvider): GenerationRuntimeConfiguration {
+    const model = this.resolveModel(provider);
     if (provider === 'cloudflare') {
       const missingConfiguration = [
         !this.cloudflareAccountId ? 'CLOUDFLARE_ACCOUNT_ID' : null,
@@ -226,7 +536,7 @@ export class GenerationService implements OnModuleInit {
       return {
         provider: 'cloudflare',
         providerLabel: 'Cloudflare Workers AI',
-        model: this.cloudflareModel,
+        model,
         quality: 'Fast · 4 steps',
         imageSize: `${this.cloudflareWidth}x${this.cloudflareHeight}`,
         configured: missingConfiguration.length === 0,
@@ -234,6 +544,9 @@ export class GenerationService implements OnModuleInit {
         usageUnit: 'neurons',
         dailyFreeUnits: this.cloudflareDailyNeuronBudget,
         estimatedUnitsPerImage: this.estimateCloudflareUsageUnits(0.25),
+        estimatedCostPerImageUsd: this.modelCost('cloudflare', model),
+        dailySpendLimitUsd: this.dailySpendLimit(),
+        availableModels: this.availableModels('cloudflare'),
       };
     }
 
@@ -242,7 +555,7 @@ export class GenerationService implements OnModuleInit {
       return {
         provider: 'gemini',
         providerLabel: 'Google Nano Banana',
-        model: this.geminiModel,
+        model,
         quality: 'High-fidelity image editing',
         imageSize: 'Matches source aspect ratio',
         configured: missingConfiguration.length === 0,
@@ -250,6 +563,9 @@ export class GenerationService implements OnModuleInit {
         usageUnit: 'tokens',
         dailyFreeUnits: null,
         estimatedUnitsPerImage: null,
+        estimatedCostPerImageUsd: this.modelCost('gemini', model),
+        dailySpendLimitUsd: this.dailySpendLimit(),
+        availableModels: this.availableModels('gemini'),
       };
     }
 
@@ -257,7 +573,7 @@ export class GenerationService implements OnModuleInit {
     return {
       provider: 'openai',
       providerLabel: 'OpenAI',
-      model: this.openAiModel,
+      model,
       quality: this.openAiQuality,
       imageSize: this.openAiSize,
       configured: missingConfiguration.length === 0,
@@ -265,7 +581,14 @@ export class GenerationService implements OnModuleInit {
       usageUnit: 'tokens',
       dailyFreeUnits: null,
       estimatedUnitsPerImage: null,
+      estimatedCostPerImageUsd: this.modelCost('openai', model),
+      dailySpendLimitUsd: this.dailySpendLimit(),
+      availableModels: this.availableModels('openai'),
     };
+  }
+
+  private dailySpendLimit(): number | null {
+    return this.dailySpendLimitUsd > 0 ? this.dailySpendLimitUsd : null;
   }
 
   async generate(
@@ -302,11 +625,12 @@ export class GenerationService implements OnModuleInit {
         if (runtime.provider === 'cloudflare') {
           await this.assertCloudflareDailyBudget(runId, source.megapixels);
         }
+        await this.assertDailySpendBudget(runId, runtime);
         const variant = await this.generateVariant(
           {
             source,
             prompt: this.variantPrompt(basePrompt, input, runId, index, input.variants),
-            safetyRetryPrompt: this.cloudflareSafetyRetryPrompt(input, index, input.variants),
+            safetyRetryPrompt: this.catalogSafeRetryPrompt(input, index, input.variants),
             index,
             outputPrefix,
             seed: this.variantSeed(runId, index),
@@ -394,20 +718,23 @@ export class GenerationService implements OnModuleInit {
     },
     runtime: GenerationRuntimeConfiguration,
   ): Promise<VariantResult> {
-    if (runtime.provider === 'cloudflare') return this.generateCloudflareVariant(args);
-    if (runtime.provider === 'gemini') return this.generateGeminiVariant(args);
-    return this.generateOpenAiVariant(args);
+    if (runtime.provider === 'cloudflare') return this.generateCloudflareVariant(args, runtime);
+    if (runtime.provider === 'gemini') return this.generateGeminiVariant(args, runtime);
+    return this.generateOpenAiVariant(args, runtime);
   }
 
-  private async generateCloudflareVariant(args: {
-    source: PreparedSource;
-    prompt: string;
-    safetyRetryPrompt: string;
-    index: number;
-    outputPrefix: string;
-    seed: number;
-    runId: string;
-  }): Promise<VariantResult> {
+  private async generateCloudflareVariant(
+    args: {
+      source: PreparedSource;
+      prompt: string;
+      safetyRetryPrompt: string;
+      index: number;
+      outputPrefix: string;
+      seed: number;
+      runId: string;
+    },
+    runtime: GenerationRuntimeConfiguration,
+  ): Promise<VariantResult> {
     const startedAt = Date.now();
     const costPerAttempt = this.estimateCloudflareCost(args.source.megapixels);
     const unitsPerAttempt = this.estimateCloudflareUsageUnits(args.source.megapixels);
@@ -433,6 +760,7 @@ export class GenerationService implements OnModuleInit {
           source: args.source,
           prompt: attempt === 0 ? args.prompt : args.safetyRetryPrompt,
           seed: attempt === 0 ? args.seed : this.cloudflareRetrySeed(args.seed),
+          model: runtime.model,
         });
         break;
       } catch (error) {
@@ -486,6 +814,7 @@ export class GenerationService implements OnModuleInit {
     source: PreparedSource;
     prompt: string;
     seed: number;
+    model: string;
   }): Promise<Buffer> {
     const form = new FormData();
     form.append('prompt', args.prompt);
@@ -499,7 +828,7 @@ export class GenerationService implements OnModuleInit {
     );
 
     const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${this.cloudflareAccountId}/ai/run/${this.cloudflareModel}`,
+      `https://api.cloudflare.com/client/v4/accounts/${this.cloudflareAccountId}/ai/run/${args.model}`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.cloudflareApiToken}` },
@@ -529,21 +858,80 @@ export class GenerationService implements OnModuleInit {
     return Buffer.from(encodedImage.replace(/^data:image\/[^;]+;base64,/, ''), 'base64');
   }
 
-  private async generateGeminiVariant(args: {
+  private async generateGeminiVariant(
+    args: {
+      source: PreparedSource;
+      prompt: string;
+      safetyRetryPrompt: string;
+      index: number;
+      outputPrefix: string;
+    },
+    runtime: GenerationRuntimeConfiguration,
+  ): Promise<VariantResult> {
+    const startedAt = Date.now();
+    let attempts = 0;
+    let image: GeminiImageResult | undefined;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      attempts += 1;
+      try {
+        image = await this.requestGeminiImage({
+          source: args.source,
+          prompt: attempt === 0 ? args.prompt : args.safetyRetryPrompt,
+          model: runtime.model,
+        });
+        break;
+      } catch (error) {
+        if (attempt === 0 && this.isGeminiSafetyError(error)) {
+          this.logger.warn(
+            `Gemini safety filter rejected variant ${args.index}; retrying once with catalog-safe direction`,
+          );
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (!image) {
+      throw this.providerError(`Google Gemini returned no image for variant ${args.index}`, 502);
+    }
+
+    const extension = this.extensionForMime(image.mimeType);
+    const key = await this.storage.putOutput(
+      args.outputPrefix,
+      `variant-${String(args.index).padStart(2, '0')}${extension}`,
+      image.data,
+      image.mimeType,
+    );
+    const durationMs = Date.now() - startedAt;
+
+    this.logger.log(
+      `Gemini variant ${args.index} (${runtime.model}): ${durationMs} ms, ${attempts} attempt${attempts === 1 ? '' : 's'}, ${image.usage.totalTokens} tokens, estimated $${runtime.estimatedCostPerImageUsd.toFixed(6)}, output ${key}`,
+    );
+    return {
+      index: args.index,
+      key,
+      costUsd: runtime.estimatedCostPerImageUsd,
+      durationMs,
+      mimeType: image.mimeType,
+      usage: image.usage,
+    };
+  }
+
+  private async requestGeminiImage(args: {
     source: PreparedSource;
     prompt: string;
-    index: number;
-    outputPrefix: string;
-  }): Promise<VariantResult> {
-    if (!this.geminiApiKey) throw new Error('GEMINI_API_KEY is missing from apps/api/.env');
-    const startedAt = Date.now();
+    model: string;
+  }): Promise<GeminiImageResult> {
+    const apiKey = this.geminiApiKey;
+    if (!apiKey) throw new Error('GEMINI_API_KEY is missing from apps/api/.env');
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.geminiModel)}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent`,
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': this.geminiApiKey,
+          'x-goog-api-key': apiKey,
         },
         body: JSON.stringify({
           contents: [
@@ -586,53 +974,41 @@ export class GenerationService implements OnModuleInit {
 
     const outputMimeType =
       imagePart?.inlineData?.mimeType ?? imagePart?.inline_data?.mime_type ?? 'image/png';
-    const extension = this.extensionForMime(outputMimeType);
-    const key = await this.storage.putOutput(
-      args.outputPrefix,
-      `variant-${String(args.index).padStart(2, '0')}${extension}`,
-      Buffer.from(encodedImage, 'base64'),
-      outputMimeType,
-    );
-    const durationMs = Date.now() - startedAt;
     const inputTokens = payload.usageMetadata?.promptTokenCount ?? 0;
     const outputTokens = payload.usageMetadata?.candidatesTokenCount ?? 0;
     const totalTokens = payload.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens;
-    const usage: ProviderUsage = {
-      inputTokens,
-      inputTextTokens: 0,
-      inputImageTokens: 0,
-      outputTokens,
-      totalTokens,
-      providerUnits: totalTokens,
-      providerUnit: 'tokens',
-    };
 
-    this.logger.log(
-      `Gemini variant ${args.index}: ${durationMs} ms, ${totalTokens} tokens, estimated $${this.geminiImageOutputCostUsd.toFixed(6)}, output ${key}`,
-    );
     return {
-      index: args.index,
-      key,
-      costUsd: this.geminiImageOutputCostUsd,
-      durationMs,
+      data: Buffer.from(encodedImage, 'base64'),
       mimeType: outputMimeType,
-      usage,
+      usage: {
+        inputTokens,
+        inputTextTokens: 0,
+        inputImageTokens: 0,
+        outputTokens,
+        totalTokens,
+        providerUnits: totalTokens,
+        providerUnit: 'tokens',
+      },
     };
   }
 
-  private async generateOpenAiVariant(args: {
-    source: PreparedSource;
-    prompt: string;
-    safetyRetryPrompt: string;
-    index: number;
-    outputPrefix: string;
-    seed: number;
-    runId: string;
-  }): Promise<VariantResult> {
+  private async generateOpenAiVariant(
+    args: {
+      source: PreparedSource;
+      prompt: string;
+      safetyRetryPrompt: string;
+      index: number;
+      outputPrefix: string;
+      seed: number;
+      runId: string;
+    },
+    runtime: GenerationRuntimeConfiguration,
+  ): Promise<VariantResult> {
     if (!this.openAi) throw new Error('OPENAI_API_KEY is missing from apps/api/.env');
     const startedAt = Date.now();
     const response = await this.openAi.images.edit({
-      model: this.openAiModel,
+      model: runtime.model,
       image: await toFile(args.source.image, 'source.png', { type: args.source.mimeType }),
       prompt: args.prompt,
       quality: this.openAiQuality,
@@ -664,12 +1040,12 @@ export class GenerationService implements OnModuleInit {
     };
 
     this.logger.log(
-      `OpenAI variant ${args.index}: ${durationMs} ms, estimated $${this.openAiImageOutputCostUsd.toFixed(6)}, output ${key}`,
+      `OpenAI variant ${args.index} (${runtime.model}): ${durationMs} ms, estimated $${runtime.estimatedCostPerImageUsd.toFixed(6)}, output ${key}`,
     );
     return {
       index: args.index,
       key,
-      costUsd: this.openAiImageOutputCostUsd,
+      costUsd: runtime.estimatedCostPerImageUsd,
       durationMs,
       mimeType: outputMimeType,
       usage,
@@ -681,7 +1057,7 @@ export class GenerationService implements OnModuleInit {
     mimeType: string,
     provider: GenerationProvider,
   ): Promise<PreparedSource> {
-    if (provider !== 'cloudflare') {
+    if (provider === 'openai') {
       const metadata = await sharp(image).metadata();
       return {
         image,
@@ -690,11 +1066,15 @@ export class GenerationService implements OnModuleInit {
       };
     }
 
+    // Gemini receives the source base64-inlined in the request body, so it needs a reference
+    // ceiling of its own to stay under the inline-data request limit.
+    const maxReferenceEdge =
+      provider === 'cloudflare' ? CLOUDFLARE_MAX_REFERENCE_EDGE : GEMINI_MAX_REFERENCE_EDGE;
     const prepared = await sharp(image)
       .rotate()
       .resize({
-        width: CLOUDFLARE_MAX_REFERENCE_EDGE,
-        height: CLOUDFLARE_MAX_REFERENCE_EDGE,
+        width: maxReferenceEdge,
+        height: maxReferenceEdge,
         fit: 'inside',
         withoutEnlargement: true,
       })
@@ -758,6 +1138,7 @@ export class GenerationService implements OnModuleInit {
     return {
       ...this.runtimeForProvider(generation.provider),
       model: generation.model,
+      estimatedCostPerImageUsd: this.modelCost(generation.provider, generation.model),
     };
   }
 
@@ -791,6 +1172,29 @@ export class GenerationService implements OnModuleInit {
     }
   }
 
+  private async assertDailySpendBudget(
+    runId: string,
+    runtime: GenerationRuntimeConfiguration,
+  ): Promise<void> {
+    if (this.dailySpendLimitUsd <= 0) return;
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const aggregate = await this.prisma.generation.aggregate({
+      where: { createdAt: { gte: today }, id: { not: runId } },
+      _sum: { costUsd: true },
+    });
+    const current = await this.prisma.generation.findUnique({
+      where: { id: runId },
+      select: { costUsd: true },
+    });
+    const spent = Number(aggregate._sum.costUsd ?? 0) + Number(current?.costUsd ?? 0);
+    if (spent + runtime.estimatedCostPerImageUsd > this.dailySpendLimitUsd) {
+      throw new Error(
+        `Daily generation spend limit reached ($${spent.toFixed(2)} of $${this.dailySpendLimitUsd.toFixed(2)} used). It resets at 00:00 UTC.`,
+      );
+    }
+  }
+
   private assertProviderConfigured(runtime: GenerationRuntimeConfiguration): void {
     if (runtime.configured) return;
     throw new Error(
@@ -818,7 +1222,9 @@ export class GenerationService implements OnModuleInit {
     if (!isProductCategory(input.category)) {
       throw new Error(`Unknown category "${String(input.category)}"`);
     }
-    if (!getScene(input.category, input.sceneId)) composePrompt(input.category, input.sceneId);
+    if (!input.creativePlan?.scenePrompt && !getScene(input.category, input.sceneId)) {
+      composePrompt(input.category, input.sceneId);
+    }
     if (!Number.isInteger(input.variants) || input.variants < 1 || input.variants > 12) {
       throw new Error('variants must be an integer between 1 and 12');
     }
@@ -839,6 +1245,10 @@ export class GenerationService implements OnModuleInit {
       input.category === 'clothing' && options.presentation === 'on-model'
         ? this.modelIdentityDirection(fingerprint, options)
         : '';
+    const plannedShot = input.creativePlan?.shots.find((shot) => shot.index === index);
+    const shotDirection = plannedShot
+      ? `Creative Director shot role: ${plannedShot.role}. ${plannedShot.moment}. Composition: ${plannedShot.composition}. Camera: ${plannedShot.camera}. Lighting: ${plannedShot.lighting}. Environment: ${plannedShot.environment}.`
+      : variation;
     return `${basePrompt}
 
 REFERENCE IMAGE:
@@ -853,26 +1263,31 @@ the other variants even when another customer selects the same controls.
 ${identity}
 
 VARIANT DIRECTION:
-Create image ${index} of ${total}. ${variation} Keep it physically plausible and obey every product-
+Create image ${index} of ${total}. ${shotDirection} ${variation} Keep it physically plausible and obey every product-
 fidelity constraint above. Return one finished image only.`;
   }
 
   private composeGenerationPrompt(input: GenerateImagesInput): string {
-    const presetPrompt = composePrompt(input.category, input.sceneId);
+    // An AI-authored scene supplies its own template; otherwise fall back to the hand-written preset.
+    const presetPrompt =
+      input.creativePlan?.scenePrompt ?? composePrompt(input.category, input.sceneId);
     const options = normalizeCampaignOptions(input.category, input.options);
     const customDirection = composeCampaignOptionsPrompt(input.category, options);
+    const intelligence = input.creativePlan?.prompt
+      ? `\n\nCREATIVE DIRECTOR PLAN:\n${input.creativePlan.prompt}`
+      : '';
     const brief = input.brief?.trim();
-    if (!brief) return `${presetPrompt}\n\n${customDirection}`;
+    if (!brief) return `${presetPrompt}\n\n${customDirection}${intelligence}`;
     return `${presetPrompt}
 
-${customDirection}
+${customDirection}${intelligence}
 
 CAMPAIGN BRIEF:
 Apply this additional art direction only where it does not conflict with product fidelity or the scene
 preset: ${brief}`;
   }
 
-  private cloudflareSafetyRetryPrompt(
+  private catalogSafeRetryPrompt(
     input: GenerateImagesInput,
     index: number,
     total: number,
@@ -1165,6 +1580,16 @@ ${diversity}`;
     );
   }
 
+  private isGeminiSafetyError(error: unknown): boolean {
+    const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    return (
+      message.includes('image_safety') ||
+      message.includes('prohibited_content') ||
+      message.includes('blocklist') ||
+      message.includes('safety')
+    );
+  }
+
   private withCloudflareAttemptUsage(
     error: unknown,
     attempts: number,
@@ -1186,7 +1611,9 @@ ${diversity}`;
         : undefined;
     if (message.includes('not configured') || message.includes('is missing'))
       return 'configuration';
-    if (message.includes('daily demo budget')) return 'daily_budget';
+    if (message.includes('daily demo budget') || message.includes('daily generation spend limit')) {
+      return 'daily_budget';
+    }
     if (
       message.includes('billing') ||
       message.includes('quota') ||
@@ -1205,8 +1632,8 @@ ${diversity}`;
     if (status === 403) return 'permission';
     if (
       this.isCloudflareSafetyError(error) ||
-      message.includes('content policy') ||
-      message.includes('safety')
+      this.isGeminiSafetyError(error) ||
+      message.includes('content policy')
     ) {
       return 'content_policy';
     }

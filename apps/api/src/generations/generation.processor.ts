@@ -21,7 +21,17 @@ export class GenerationProcessor extends WorkerHost {
   }
 
   async process(job: Job<GenerationJobData>): Promise<{ outputKeys: string[] }> {
-    const { generationId, inputKey, category, sceneId, variants, brief, options } = job.data;
+    const {
+      generationId,
+      inputKey,
+      category,
+      sceneId,
+      variants,
+      productType,
+      brief,
+      options,
+      creativePlan,
+    } = job.data;
     if (!isProductCategory(category)) {
       throw new Error(`Queued job contains unknown category "${category}"`);
     }
@@ -41,8 +51,10 @@ export class GenerationProcessor extends WorkerHost {
           category,
           sceneId,
           variants,
+          productType,
           brief,
           options,
+          creativePlan,
         },
         {
           runId: generationId,

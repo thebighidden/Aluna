@@ -7,6 +7,16 @@ product's shape, color, materials, logos, labels, and printed text. This pnpm mo
 - `apps/api` — NestJS API, provider-selectable image generation engine, standalone CLI, BullMQ
   worker, Prisma, and R2/local storage.
 
+## Project documentation
+
+- [Product idea and concept](./docs/01-PRODUCT-CONCEPT.md) — the complete non-technical vision,
+  customer journey, value, principles, business possibilities, and roadmap.
+- [Technical architecture](./docs/02-TECHNICAL-ARCHITECTURE.md) — frontend, backend, database tables,
+  design system, security, AI layers, extension conventions, and testing.
+- [Deployment and accounts](./docs/03-DEPLOYMENT-AND-ACCOUNTS.md) — provider accounts, secrets,
+  Vercel, Render, PostgreSQL, queue, R2, DNS, application accounts, verification, backups, and
+  troubleshooting.
+
 ## Prerequisites
 
 - Node.js 22+
@@ -110,18 +120,28 @@ provider from System health; provider secrets remain server-side.
 The Studio is a real API client, not a simulated interface:
 
 1. Sign in and upload a PNG, JPG, or WEBP source image up to 15 MB.
-2. Select one of six categories and its three scene presets.
-3. Choose detailed creative controls. Clothing supports on-model, ghost-mannequin, and flat-lay
+2. Enter the exact product type, then select one of seven categories and its three scene presets.
+   Health & Wellness provides performance, sports-science, and active-recovery directions.
+3. Complete the versioned Brand Profile with business context, audience, official logo, slogan,
+   palette, typography, visual language, defaults, and prohibited contexts.
+4. Choose detailed creative controls. Clothing supports on-model, ghost-mannequin, and flat-lay
    presentation plus adult model gender, age, appearance, body build, hair, expression, pose, and
    framing. Every category supports mood, composition, camera, lighting, palette, and variation
    strength.
-4. Optionally add a short campaign brief and choose 1–12 variants.
-5. The API stores the source, creates a Postgres record, and queues the BullMQ job in Redis.
-6. The Studio polls protected job status and reveals each generated variant as it completes.
-7. Results remain available in Campaigns, Asset library, and Generation history.
+5. Optionally add a short campaign brief and choose 1–12 variants.
+6. The API stores the source, creates a Postgres record, and queues the BullMQ job in Redis.
+7. The Studio polls protected job status and reveals each generated variant as it completes.
+8. Results remain available in Campaigns, Asset library, and Generation history.
 
-The sidebar also includes scene presets, generation history, and personal account settings. Every
-customer account is an independent, single-person Studio workspace.
+Before a paid generation, Creative Director classifies the product context, corrects incoherent scene
+choices, compiles campaign DNA, and creates a distinct shot plan for every variant. It stores the exact
+Brand Profile version, product context, creative plan, and semantic fingerprint used by the campaign.
+Creatine and similar supplements are routed to Health & Wellness rather than a kitchen scene. See
+[BRAND_AND_CREATIVE_DIRECTOR.md](./BRAND_AND_CREATIVE_DIRECTOR.md) for the complete architecture and
+roadmap.
+
+The sidebar also includes Brand Profile, scene presets, generation history, and personal account
+settings. Every customer account is an independent, single-person Studio workspace.
 
 ## Admin operations dashboard
 
@@ -142,12 +162,20 @@ none of the metrics are hardcoded. It includes:
   last activity.
 - BullMQ worker/queue health, storage mode, model defaults, and classified provider failures.
 - A persisted global model selector for Cloudflare FLUX.2, Google Nano Banana, and OpenAI.
+- Persistent admin routes (`/admin/users`, `/admin/generations`, `/admin/waitlist`,
+  `/admin/api-keys`, and the analytics/health routes) so navigation survives a hard refresh.
+- Searchable, sortable user and waiting-list tables with account-state filters, launch-pipeline
+  stages, internal lead notes, and conversion tracking.
+- Write-only provider credential management. Dashboard-entered keys are encrypted with AES-256-GCM
+  using a key derived from `JWT_ACCESS_SECRET`; only configuration source and the final four
+  characters are returned to the browser. Keep `JWT_ACCESS_SECRET` stable so saved credentials
+  remain decryptable.
 - Cloudflare neuron usage, estimated remaining daily demo images, provider mix, and internal
   list-price estimates.
 - Optional reconciliation with the OpenAI organization Usage and Costs APIs when
   `OPENAI_ADMIN_KEY` is configured. Without it, the dashboard clearly labels local cost estimates.
 
-The optional admin key stays on the API server and is never sent to the browser.
+Provider and optional admin keys stay on the API server and are never returned to the browser.
 
 ## Authentication and account access
 
@@ -231,9 +259,13 @@ R2_BUCKET=
 
 ## Data model
 
-Prisma stores `User`, `RefreshSession`, `Generation`, `PlatformSetting`, `SiteVisit`, and
-`WaitlistSubscriber` records. User records include timed-ban state and enforceable generation
-allowances. The singleton platform setting persists the Super Admin's active generation provider.
+Prisma stores `User`, `RefreshSession`, `BrandProfile`, `BrandProfileVersion`, `ProductAnalysis`,
+`Generation`, `PlatformSetting`, `SiteVisit`, and `WaitlistSubscriber` records. User records include
+timed-ban state and enforceable generation allowances. Brand Profile versions make historical brand
+decisions explainable, and Product Analysis stores the image-aware product facts and proposed scenes.
+The singleton platform setting persists the Super Admin's active generation provider, model choices,
+and encrypted provider credential overrides. Waitlist records include CRM stage, contact timestamp,
+and private admin notes.
 Generation records include immutable owner snapshots, provider, status, category, scene, campaign
 brief, source/output keys, requested/completed variants, model settings, provider-specific usage
 units, detailed OpenAI token usage when applicable, estimated cost, duration, classified errors, and

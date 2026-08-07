@@ -48,6 +48,25 @@ becoming the product's visual identity; they are not a mathematical guarantee th
 never produce similar people. Evaluate facial and compositional similarity across a large batch when
 changing these rules.
 
+## Brand Profile and Creative Director
+
+The scene preset is no longer the complete prompt. `CreativeDirectorService` compiles the saved Brand
+Profile, classified product context, campaign DNA, and distinct shot plans into a provider-independent
+direction. The exact profile version and plan are stored on the generation record.
+
+Keep this precedence when editing prompts: product fidelity and legal restrictions, Brand Profile,
+product context, campaign brief, preset, then provider creativity. Do not make a preset capable of
+overriding a client's forbidden environment or product-context rule.
+
+For product-context regressions, run:
+
+```bash
+pnpm --filter @product-photo/api test:creative
+```
+
+The creatine fixture must remain classified as sports nutrition and must never retain a food/kitchen
+direction. Add equivalent regression cases whenever a new business subtype or context rule is added.
+
 ## Iteration log
 
 Add one row per experiment. Use output keys or a run ID so the evidence can be recovered.

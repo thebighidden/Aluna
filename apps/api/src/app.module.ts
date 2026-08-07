@@ -10,9 +10,13 @@ import { PrismaModule } from './prisma/prisma.module';
 import { StorageModule } from './storage/storage.module';
 import { WaitlistModule } from './waitlist/waitlist.module';
 import { UsersModule } from './users/users.module';
+import { MessagingModule } from './messaging/messaging.module';
+import { SupportModule } from './support/support.module';
 import { AdminModule } from './admin/admin.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { HealthController } from './health/health.controller';
+import { BrandProfileModule } from './brand-profile/brand-profile.module';
+import { CampaignsModule } from './campaigns/campaigns.module';
 
 @Module({
   imports: [
@@ -28,14 +32,18 @@ import { HealthController } from './health/health.controller';
       }),
     }),
     PrismaModule,
+    BrandProfileModule,
     AuthModule,
     AnalyticsModule,
     AdminModule,
     StorageModule,
     GenerationModule,
     GenerationsModule,
+    CampaignsModule,
     WaitlistModule,
     UsersModule,
+    MessagingModule,
+    SupportModule,
   ],
   controllers: [HealthController],
 })

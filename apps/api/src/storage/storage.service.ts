@@ -62,6 +62,19 @@ export class StorageService {
     return key;
   }
 
+  async putBrandAsset(
+    userId: string,
+    originalName: string,
+    body: Buffer,
+    contentType: string,
+  ): Promise<string> {
+    const safeExtension = extname(originalName).toLowerCase() || this.extensionForMime(contentType);
+    const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
+    const key = `brand-assets/${userId}/logo-${digest}${safeExtension}`;
+    await this.put(key, body, contentType);
+    return key;
+  }
+
   async get(key: string): Promise<Buffer> {
     if (!this.r2) {
       return readFile(join(this.localRoot, key));

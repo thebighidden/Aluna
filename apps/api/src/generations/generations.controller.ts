@@ -10,6 +10,7 @@ import {
   NotFoundException,
   Param,
   ParseIntPipe,
+  Patch,
   Post,
   Req,
   Sse,
@@ -18,7 +19,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { Generation, GenerationStatus } from '@prisma/client';
+import { Generation, GenerationStatus, Prisma } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { lookup } from 'mime-types';
 import { randomUUID } from 'node:crypto';
@@ -33,8 +34,14 @@ import { getScene, isProductCategory, STYLES_CONFIG } from '../generation/styles
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateGenerationDto } from './dto/create-generation.dto';
+import { AnalyzeProductDto } from './dto/analyze-product.dto';
+import { ShareGenerationDto } from './dto/share-generation.dto';
+import { UpdateKeptAssetsDto } from './dto/update-kept-assets.dto';
 import { GENERATION_QUEUE, GenerationJobData } from './generation-queue.constants';
 import { GenerationsEventsService } from './generations-events.service';
+import { CreativeDirectorService } from '../creative-director/creative-director.service';
+import { ProductAnalysisService } from '../product-analysis/product-analysis.service';
+import { aiSceneKey, isAiSceneId } from '../product-analysis/product-analysis.types';
 
 @Controller('generations')
 export class GenerationsController {
@@ -44,7 +51,41 @@ export class GenerationsController {
     private readonly storage: StorageService,
     private readonly events: GenerationsEventsService,
     private readonly generationService: GenerationService,
+    private readonly creativeDirector: CreativeDirectorService,
+    private readonly productAnalysis: ProductAnalysisService,
   ) {}
+
+  @Post('analyze')
+  @Permissions(Permission.GenerationCreate)
+  @UseInterceptors(
+    FileInterceptor('image', {
+      storage: memoryStorage(),
+      limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+      fileFilter: (_request, file, callback) => {
+        callback(
+          file.mimetype.startsWith('image/')
+            ? null
+            : new BadRequestException('Only image uploads are accepted'),
+          file.mimetype.startsWith('image/'),
+        );
+      },
+    }),
+  )
+  async analyze(
+    @Req() request: RequestWithUser,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() dto: AnalyzeProductDto,
+  ) {
+    if (!file) throw new BadRequestException('A multipart image field named "image" is required');
+    return this.productAnalysis.analyze({
+      userId: request.user.id,
+      image: file.buffer,
+      mimeType: file.mimetype,
+      inputKey: file.originalname,
+      productType: dto.productType?.trim() || undefined,
+      brief: dto.brief?.trim() || undefined,
+    });
+  }
 
   @Get('presets')
   @Permissions(Permission.PresetRead)
@@ -100,16 +141,46 @@ export class GenerationsController {
     status: string;
     provider: string;
     model: string;
+    category: string;
+    sceneId: string;
+    contextWarnings: string[];
     statusUrl: string;
     eventsUrl: string;
   }> {
     if (!file) throw new BadRequestException('A multipart image field named "image" is required');
-    if (!isProductCategory(dto.category) || !getScene(dto.category, dto.sceneId)) {
+    if (!isProductCategory(dto.category)) {
+      throw new BadRequestException(`Unknown category "${dto.category}"`);
+    }
+
+    const analysis = dto.analysisId
+      ? await this.productAnalysis.findForUser(dto.analysisId, request.user.id)
+      : null;
+    if (dto.analysisId && !analysis) {
+      throw new BadRequestException('That product analysis was not found');
+    }
+    if (isAiSceneId(dto.sceneId)) {
+      const key = aiSceneKey(dto.sceneId);
+      if (!analysis?.scenes.some((scene) => scene.id === key)) {
+        throw new BadRequestException(
+          `Scene "${dto.sceneId}" is not part of the supplied product analysis`,
+        );
+      }
+    } else if (!getScene(dto.category, dto.sceneId)) {
       throw new BadRequestException(
         `Scene "${dto.sceneId}" is not valid for category "${dto.category}"`,
       );
     }
     await this.enforceGenerationPolicy(request.user.id, dto.variants);
+
+    const campaign = dto.campaignId
+      ? await this.prisma.campaign.findFirst({
+          where: { id: dto.campaignId, userId: request.user.id },
+          select: { id: true },
+        })
+      : null;
+    if (dto.campaignId && !campaign) {
+      throw new BadRequestException('That campaign was not found in your workspace');
+    }
 
     let creativeOptions: Record<string, string>;
     try {
@@ -119,6 +190,17 @@ export class GenerationsController {
     }
 
     const generationId = randomUUID();
+    const creativePlan = await this.creativeDirector.createPlan({
+      userId: request.user.id,
+      generationId,
+      category: dto.category,
+      sceneId: dto.sceneId,
+      variants: dto.variants,
+      productType: dto.productType?.trim() || undefined,
+      brief: dto.brief?.trim() || undefined,
+      options: creativeOptions,
+      analysis,
+    });
     const runtime = await this.generationService.getRuntimeConfiguration();
     const inputKey = await this.storage.putInput(
       generationId,
@@ -130,6 +212,7 @@ export class GenerationsController {
       data: {
         id: generationId,
         userId: request.user.id,
+        campaignId: campaign?.id ?? null,
         ownerName: request.user.name,
         ownerEmail: request.user.email,
         provider: runtime.provider,
@@ -138,10 +221,19 @@ export class GenerationsController {
         imageSize: runtime.imageSize,
         providerUsageUnit: runtime.usageUnit,
         status: GenerationStatus.QUEUED,
-        category: dto.category,
-        sceneId: dto.sceneId,
+        category: creativePlan.effectiveCategory,
+        sceneId: creativePlan.effectiveSceneId,
         brief: dto.brief?.trim() || null,
+        productType: dto.productType?.trim() || creativePlan.productContext.productType,
         creativeOptions,
+        brandProfileVersion: creativePlan.brandProfileVersion,
+        brandSnapshot: creativePlan.brandSnapshot
+          ? (creativePlan.brandSnapshot as Prisma.InputJsonValue)
+          : undefined,
+        productContext: creativePlan.productContext as unknown as Prisma.InputJsonValue,
+        creativePlan: creativePlan as unknown as Prisma.InputJsonValue,
+        creativeFingerprint: creativePlan.fingerprint,
+        contextWarnings: creativePlan.warnings,
         inputKey,
         requestedVariants: dto.variants,
       },
@@ -154,11 +246,13 @@ export class GenerationsController {
           generationId,
           userId: request.user.id,
           inputKey,
-          category: dto.category,
-          sceneId: dto.sceneId,
+          category: creativePlan.effectiveCategory,
+          sceneId: creativePlan.effectiveSceneId,
           variants: dto.variants,
+          productType: dto.productType?.trim() || creativePlan.productContext.productType,
           brief: dto.brief?.trim() || undefined,
           options: creativeOptions,
+          creativePlan,
         },
         {
           jobId: generationId,
@@ -184,6 +278,9 @@ export class GenerationsController {
       status: 'queued',
       provider: runtime.provider,
       model: runtime.model,
+      category: creativePlan.effectiveCategory,
+      sceneId: creativePlan.effectiveSceneId,
+      contextWarnings: creativePlan.warnings,
       statusUrl: `/generations/${generationId}`,
       eventsUrl: `/generations/${generationId}/events`,
     };
@@ -314,6 +411,51 @@ export class GenerationsController {
     }
   }
 
+  @Patch(':id/share')
+  @Permissions(Permission.GenerationReadOwn)
+  async setShared(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: ShareGenerationDto,
+  ) {
+    const generation = await this.prisma.generation.findFirst({
+      where: { id, userId: request.user.id },
+    });
+    if (!generation) throw new NotFoundException('Generation not found');
+    if (dto.shared && (generation.status !== GenerationStatus.DONE || !generation.outputKeys.length)) {
+      throw new BadRequestException('Only completed campaigns with images can be shared');
+    }
+    const updated = await this.prisma.generation.update({
+      where: { id },
+      data: { sharedAt: dto.shared ? new Date() : null },
+    });
+    return this.serializeGeneration(updated);
+  }
+
+  @Patch(':id/kept')
+  @Permissions(Permission.GenerationReadOwn)
+  async setKept(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateKeptAssetsDto,
+  ) {
+    const generation = await this.prisma.generation.findFirst({
+      where: { id, userId: request.user.id },
+    });
+    if (!generation) throw new NotFoundException('Generation not found');
+
+    const valid = new Set(generation.outputKeys);
+    const invalid = dto.keptOutputKeys.filter((key) => !valid.has(key));
+    if (invalid.length) {
+      throw new BadRequestException('One or more selected images do not belong to this campaign');
+    }
+    const updated = await this.prisma.generation.update({
+      where: { id },
+      data: { keptOutputKeys: [...new Set(dto.keptOutputKeys)] },
+    });
+    return this.serializeGeneration(updated);
+  }
+
   private serializeGeneration(generation: Generation) {
     return {
       id: generation.id,
@@ -325,9 +467,16 @@ export class GenerationsController {
       category: generation.category,
       sceneId: generation.sceneId,
       brief: generation.brief,
+      productType: generation.productType,
       creativeOptions: generation.creativeOptions,
+      brandProfileVersion: generation.brandProfileVersion,
+      productContext: generation.productContext,
+      creativePlan: generation.creativePlan,
+      creativeFingerprint: generation.creativeFingerprint,
+      contextWarnings: generation.contextWarnings,
       inputUrl: `/generations/${generation.id}/input`,
       outputKeys: generation.outputKeys,
+      keptOutputKeys: generation.keptOutputKeys,
       requestedVariants: generation.requestedVariants,
       resultUrls: generation.outputKeys.map(
         (_key, index) => `/generations/${generation.id}/results/${index + 1}`,
@@ -343,6 +492,8 @@ export class GenerationsController {
       durationMs: generation.durationMs,
       error: generation.error,
       errorCode: generation.errorCode,
+      campaignId: generation.campaignId,
+      sharedAt: generation.sharedAt,
       createdAt: generation.createdAt,
     };
   }
